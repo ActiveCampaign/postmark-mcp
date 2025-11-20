@@ -96,7 +96,10 @@ async function main() {
 async function handleShutdown(server) {
   console.error('Shutting down server...');
   try {
-    await server.disconnect();
+    // McpServer currently exposes close(); disconnect() is not available.
+    if (typeof server.close === 'function') {
+      await server.close();
+    }
     console.error('Server shutdown complete');
     process.exit(0);
   } catch (error) {
