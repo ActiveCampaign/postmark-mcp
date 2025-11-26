@@ -19,29 +19,30 @@ We'd love to hear from you! Please share your feedback and suggestions using our
 ## Installation (Local Development)
 **Clone the repository:**
 ```sh
-  git clone https://github.com/ActiveCampaign/postmark-mcp
-  cd postmark-mcp
+git clone https://github.com/ActiveCampaign/postmark-mcp
+cd postmark-mcp
 ```
 
 **Install dependencies:**
 ```sh
-  npm install
-  # or
-  yarn
-  # or
-  bun install
+npm install
+# or
+yarn
+# or
+bun install
 ```
 
-## Setup
-**Configure environment variables:**
+## Configuration (Local Development)
 
-Copy `.env.example` to `.env`
+Create your own environment file from the example
 
 ```sh
-  cp .env.example .env
+cp .env.example .env
 ```
 
-Edit `.env` and fill in your Postmark credentials and settings.
+Edit your `.env` to contain your Postmark credentials and settings.
+
+**Important:** This is intended for local development purposes only. Secrets should never be stored in version control.
 
 | Variable                  | Description                                      | Required   |
 |---------------------------|--------------------------------------------------|------------|
@@ -49,15 +50,14 @@ Edit `.env` and fill in your Postmark credentials and settings.
 | DEFAULT_SENDER_EMAIL      | Default sender email address                     | Yes        |
 | DEFAULT_MESSAGE_STREAM    | Postmark message stream (e.g., 'outbound')       | Yes        |
 
-
 **Run the server:**
 
 ```sh
-  npm start
-  # or
-  yarn start
-  # or
-  bun start
+npm start
+# or
+yarn start
+# or
+bun start
 ```
 
 ## Cursor Quick Install
