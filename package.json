@@ -1,21 +1,40 @@
 {
-  "name": "postmark-mcp",
+  "name": "@activecampaign/postmark-mcp",
   "version": "1.0.0",
-  "description": "Universal Postmark MCP server using official SDK",
+  "description": "Official Postmark MCP server for sending emails via Claude and AI assistants",
+  "keywords": ["postmark", "email", "mcp", "ai"],
+  "author": "Jabal Torres",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/activecampaign/postmark-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/activecampaign/postmark-mcp/issues"
+  },
+  "homepage": "https://github.com/activecampaign/postmark-mcp#readme",
   "main": "index.js",
   "type": "module",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "start": "node index.js",
     "inspector": "npx @modelcontextprotocol/inspector index.js"
   },
-  "keywords": ["postmark", "email", "mcp", "ai"],
-  "author": "Jabal Torres",
-  "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "dotenv": "^16.4.5",
     "node-fetch": "^3.3.2",
     "postmark": "^4.0.5",
     "zod": "^3.23.8"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

@@ -1,69 +1,79 @@
-# Postmark MCP Server
+# Official Postmark MCP Server&nbsp;&nbsp;&nbsp;[![NPM Version](https://img.shields.io/npm/v/@activecampaign/postmark-mcp.svg)](https://www.npmjs.com/package/@activecampaign/postmark-mcp)&nbsp;&nbsp;![MIT licensed](https://img.shields.io/npm/l/%40modelcontextprotocol%2Fsdk)
 
-An MCP server implementation for Postmark email services.
+Send emails with Postmark using Claude and other MCP-compatible AI assistants.
 
 ## Features
-- Exposes a Model Context Protocol (MCP) server for sending emails via Postmark
+- Exposes a Model Context Protocol (MCP) server for sending emails via your [Postmark account](https://account.postmarkapp.com/sign_up)
 - Simple configuration via environment variables
 - Comprehensive error handling and graceful shutdown
 - Secure logging practices (no sensitive data exposure)
 - Automatic email tracking configuration
 
 ## Feedback
-We'd love to hear from you! Please share your feedback and suggestions through our [feedback form](https://forms.gle/zVdZLAJPM81Vo2Wh8).
+We'd love to hear from you! Please share your feedback and suggestions using our [feedback form](https://forms.gle/zVdZLAJPM81Vo2Wh8).
 
 ## Requirements
 - Node.js (v16 or higher recommended)
 - A Postmark account and server token
 
+## Installation (Local Development)
+**Clone the repository:**
+```sh
+  git clone https://github.com/ActiveCampaign/postmark-mcp
+  cd postmark-mcp
+```
+
+**Install dependencies:**
+```sh
+  npm install
+  # or
+  yarn
+  # or
+  bun install
+```
+
 ## Setup
+**Configure environment variables:**
 
-1. **Clone the repository:**
-   ```sh
-   git clone https://github.com/ActiveCampaign/postmark-mcp
-   cd postmark-mcp
-   ```
+Copy `.env.example` to `.env`
 
-2. **Install dependencies:**
-   ```sh
-   npm install
-   ```
+```sh
+  cp .env.example .env
+```
 
-3. **Configure environment variables:**
-   - Copy `.env.example` to `.env`:
-     ```sh
-     cp .env.example .env
-     ```
-   - Edit `.env` and fill in your Postmark credentials and settings.
+Edit `.env` and fill in your Postmark credentials and settings.
 
-   | Variable                | Description                                      | Required |
-   |------------------------|--------------------------------------------------|----------|
-   | POSTMARK_SERVER_TOKEN  | Your Postmark server API token                   | Yes      |
-   | DEFAULT_SENDER_EMAIL   | Default sender email address                     | Yes      |
-   | DEFAULT_MESSAGE_STREAM | Postmark message stream (e.g., 'outbound')      | Yes      |
+| Variable                  | Description                                      | Required   |
+|---------------------------|--------------------------------------------------|------------|
+| POSTMARK_SERVER_TOKEN     | Your Postmark server API token                   | Yes        |
+| DEFAULT_SENDER_EMAIL      | Default sender email address                     | Yes        |
+| DEFAULT_MESSAGE_STREAM    | Postmark message stream (e.g., 'outbound')       | Yes        |
 
-4. **Run the server:**
-   ```sh
-   npm start
-   ```
 
-## Quick Install via Cursor Deeplink
+**Run the server:**
 
-You can quickly install this MCP server in Cursor by clicking the following button:
+```sh
+  npm start
+  # or
+  yarn start
+  # or
+  bun start
+```
 
+## Cursor Quick Install
 <div>
   <a href="cursor://anysphere.cursor-deeplink/mcp/install?name=Postmark&config=eyJjb21tYW5kIjoibm9kZSIsImFyZ3MiOlsiaW5kZXguanMiXSwiZW52Ijp7IlBPU1RNQVJLX1NFUlZFUl9UT0tFTiI6IiIsIkRFRkFVTFRfU0VOREVSX0VNQUlMIjoiIiwiREVGQVVMVF9NRVNTQUdFX1NUUkVBTSI6Im91dGJvdW5kIn19">
     <img src="https://img.shields.io/badge/Add_Postmark_MCP_Server-to_Cursor-00A4DB?style=for-the-badge&logo=cursor&logoColor=white" alt="Add Postmark MCP Server to Cursor" />
   </a>
 </div>
+<br />
 
-> **Note**: After clicking the button, you'll need to:
-> 1. Set your `POSTMARK_SERVER_TOKEN` in the MCP configuration
-> 2. Set your `DEFAULT_SENDER_EMAIL` in the MCP configuration
-> 3. Set your `DEFAULT_MESSAGE_STREAM` in the MCP configuration (defaults to "outbound")
+After installing the MCP, update your configuration to set:
+- `POSTMARK_SERVER_TOKEN`
+- `DEFAULT_SENDER_EMAIL`
+- `DEFAULT_MESSAGE_STREAM` (default: `outbound`)
 
 ## Claude and Cursor MCP Configuration Example
-
 ```json
 {
   "mcpServers": {
@@ -80,12 +90,10 @@ You can quickly install this MCP server in Cursor by clicking the following butt
 }
 ```
 
-## Tool Reference
-
-This section provides a complete reference for the Postmark MCP server tools, including example prompts and expected payloads for each.
+## Tools
+This section provides a complete reference for the Postmark MCP server tools including example prompts and payloads.
 
 ### Table of Contents
-
 - [Email Management Tools](#email-management-tools)
   - [sendEmail](#1-sendemail)
   - [sendEmailWithTemplate](#2-sendemailwithtemplate)
@@ -95,9 +103,7 @@ This section provides a complete reference for the Postmark MCP server tools, in
   - [getDeliveryStats](#4-getdeliverystats)
 
 ## Email Management Tools
-
 ### 1. sendEmail
-
 Sends a single text email.
 
 **Example Prompt:**
@@ -126,7 +132,6 @@ Subject: Meeting Reminder
 ```
 
 ### 2. sendEmailWithTemplate
-
 Sends an email using a pre-defined template.
 
 **Example Prompt:**
@@ -164,7 +169,6 @@ Template: template-id-or-alias-here
 ```
 
 ## Template Management Tools
-
 ### 3. listTemplates
 
 Lists all available templates.
@@ -190,7 +194,6 @@ Show me a list of all the email templates available in our Postmark account.
 ```
 
 ## Statistics & Tracking Tools
-
 ### 4. getDeliveryStats
 
 Retrieves email delivery statistics.
@@ -222,7 +225,6 @@ Tag: marketing
 ```
 
 ## Implementation Details
-
 ### Automatic Configuration
 All emails are automatically configured with:
 - `TrackOpens: true`
@@ -245,3 +247,6 @@ The server implements comprehensive error handling:
 ---
 
 *For more information about the Postmark API, visit [Postmark's Developer Documentation](https://postmarkapp.com/developer).* 
+
+## License
+[MIT](LICENSE) © ActiveCampaign
