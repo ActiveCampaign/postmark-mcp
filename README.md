@@ -42,7 +42,7 @@ cp .env.example .env
 
 Edit your `.env` to contain your Postmark credentials and settings.
 
-**Important:** This is intended for local development purposes only. Secrets should never be stored in version control.
+**Important:** This is intended for local development purposes only. Secrets should never be stored in version control and `.env` type files should be added to `.gitignore`.
 
 | Variable                  | Description                                      | Required   |
 |---------------------------|--------------------------------------------------|------------|
