@@ -9,12 +9,23 @@ Send emails with Postmark using Claude and other MCP-compatible AI assistants.
 - Secure logging practices (no sensitive data exposure)
 - Automatic email tracking configuration
 
+## Useful Docs
+- [📒 API Documentation](https://postmarkapp.com/developer)
+- [🔎 API Explorer](https://postmarkapp.com/api-explorer)
+- [📖 Engineering Articles](https://postmarkapp.com/blog/topics/engineering)
+
 ## Feedback
 We'd love to hear from you! Please share your feedback and suggestions using our [feedback form](https://forms.gle/zVdZLAJPM81Vo2Wh8).
 
+Follow us on X - [@postmarkapp](https://x.com/postmarkapp)
+
+---
+
+# Setup
+
 ## Requirements
 - Node.js (v16 or higher recommended)
-- A Postmark account and server token
+- A [Postmark account](https://account.postmarkapp.com/sign_up) and server token
 
 ## Installation (Local Development)
 **Clone the repository:**
