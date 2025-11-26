@@ -1,28 +1,18 @@
-#!/usr/bin/env node
-
 /**
- * @file Postmark MCP Server - Official SDK Implementation
- * @description Universal MCP server for Postmark using the official TypeScript SDK
+ * @file Postmark MCP Server
+ * @description Official Postmark MCP server for sending emails via Claude and AI assistants
  * @author Jabal Torres
  * @version 1.0.0
  * @license MIT
  */
 
-import { config } from 'dotenv';
-import { dirname } from 'path';
-import { fileURLToPath } from 'url';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-
-// Load environment variables from .env file
-config();
-
+import 'dotenv/config';
+import fetch from 'node-fetch';
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import postmark from "postmark";
 
-// Postmark configuration
 const serverToken = process.env.POSTMARK_SERVER_TOKEN;
 const defaultSender = process.env.DEFAULT_SENDER_EMAIL;
 const defaultMessageStream = process.env.DEFAULT_MESSAGE_STREAM;
@@ -30,31 +20,30 @@ const defaultMessageStream = process.env.DEFAULT_MESSAGE_STREAM;
 // Initialize Postmark client and MCP server
 async function initializeServices() {
   try {
-    // Validate required environment variables
     if (!serverToken) {
-      console.error('Error: POSTMARK_SERVER_TOKEN is not set');
+      console.error('[ERROR] POSTMARK_SERVER_TOKEN is not set');
       process.exit(1);
     }
+
     if (!defaultSender) {
-      console.error('Error: DEFAULT_SENDER_EMAIL is not set');
+      console.error('[ERROR] DEFAULT_SENDER_EMAIL is not set');
       process.exit(1);
     }
+
     if (!defaultMessageStream) {
-      console.error('Error: DEFAULT_MESSAGE_STREAM is not set');
+      console.error('[ERROR] DEFAULT_MESSAGE_STREAM is not set');
       process.exit(1);
     }
 
-    console.error('Initializing Postmark MCP server (Official SDK)...');
-    console.error('Default sender:', defaultSender);
-    console.error('Message stream:', defaultMessageStream);
+    console.error('Initializing Postmark MCP server..');
+    console.error('Default sender: ', defaultSender);
+    console.error('Message stream: ', defaultMessageStream);
 
-    // Initialize Postmark client
     const client = new postmark.ServerClient(serverToken);
     
     // Verify Postmark client by making a test API call
     await client.getServer();
-    
-    // Create MCP server
+
     const mcpServer = new McpServer({
       name: "postmark-mcp",
       version: "1.0.0"
@@ -65,6 +54,7 @@ async function initializeServices() {
     if (error.code || error.message) {
       throw new Error(`Initialization failed: ${error.code ? `${error.code} - ` : ''}${error.message}`);
     }
+
     throw new Error('Initialization failed: An unexpected error occurred');
   }
 }
@@ -73,46 +63,46 @@ async function initializeServices() {
 async function main() {
   try {
     const { postmarkClient, mcpServer: server } = await initializeServices();
-    
-    // Register tools with validated client
+
     registerTools(server, postmarkClient);
-    
-    console.error('Connecting to MCP transport...');
+
+    console.error('Connecting to MCP transport..');
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    
+
     console.error('Postmark MCP server is running and ready!');
-    
-    // Setup graceful shutdown
+    console.error(`Available tools: sendEmail, sendEmailWithTemplate, listTemplates, getDeliveryStats`);
+
     process.on('SIGTERM', () => handleShutdown(server));
     process.on('SIGINT', () => handleShutdown(server));
   } catch (error) {
-    console.error('Server initialization failed:', error.message);
+    console.error('Server initialization failed: ', error.message);
     process.exit(1);
   }
 }
 
 // Graceful shutdown handler
 async function handleShutdown(server) {
-  console.error('Shutting down server...');
+  console.error('Shutting down server..');
+
   try {
-    await server.disconnect();
-    console.error('Server shutdown complete');
+    await server.close();
+    console.error('Server shutdown complete. Bye! 👋');
     process.exit(0);
   } catch (error) {
-    console.error('Error during shutdown:', error.message);
+    console.error('[ERROR] Shutdown: ', error.message);
     process.exit(1);
   }
 }
 
 // Global error handlers
 process.on('uncaughtException', (error) => {
-  console.error('Uncaught exception:', error.message);
+  console.error('Uncaught exception: ', error.message);
   process.exit(1);
 });
 
 process.on('unhandledRejection', (reason) => {
-  console.error('Unhandled rejection:', reason instanceof Error ? reason.message : reason);
+  console.error('Unhandled rejection: ', reason instanceof Error ? reason.message : reason);
   process.exit(1);
 });
 
@@ -143,10 +133,10 @@ function registerTools(server, postmarkClient) {
       if (htmlBody) emailData.HtmlBody = htmlBody;
       if (tag) emailData.Tag = tag;
 
-      console.error('Sending email...', { to, subject });
+      console.error('Sending email..', { to, subject });
       const result = await postmarkClient.sendEmail(emailData);
-      console.error('Email sent successfully:', result.MessageID);
-      
+      console.error('Email sent successfully: ', result.MessageID);
+
       return {
         content: [{
           type: "text",
@@ -189,9 +179,9 @@ function registerTools(server, postmarkClient) {
 
       if (tag) emailData.Tag = tag;
 
-      console.error('Sending template email...', { to, templateId: templateId || templateAlias });
+      console.error('Sending template email..', { to, templateId: templateId || templateAlias });
       const result = await postmarkClient.sendEmailWithTemplate(emailData);
-      console.error('Template email sent successfully:', result.MessageID);
+      console.error('Template email sent successfully: ', result.MessageID);
       
       return {
         content: [{
@@ -207,14 +197,14 @@ function registerTools(server, postmarkClient) {
     "listTemplates",
     {},
     async () => {
-      console.error('Fetching templates...');
+      console.error('Fetching templates..');
       const result = await postmarkClient.getTemplates();
       console.error(`Found ${result.Templates.length} templates`);
-      
+
       const templateList = result.Templates.map(t => 
         `• **${t.Name}**\n  - ID: ${t.TemplateId}\n  - Alias: ${t.Alias || 'none'}\n  - Subject: ${t.Subject || 'none'}`
       ).join('\n\n');
-      
+
       return {
         content: [{
           type: "text",
@@ -237,11 +227,11 @@ function registerTools(server, postmarkClient) {
       if (fromDate) query.push(`fromdate=${encodeURIComponent(fromDate)}`);
       if (toDate) query.push(`todate=${encodeURIComponent(toDate)}`);
       if (tag) query.push(`tag=${encodeURIComponent(tag)}`);
-      
+
       const url = `https://api.postmarkapp.com/stats/outbound${query.length ? '?' + query.join('&') : ''}`;
-      
-      console.error('Fetching delivery stats...');
-      
+
+      console.error('Fetching delivery stats..');
+
       const response = await fetch(url, {
         headers: {
           "Accept": "application/json",
@@ -255,16 +245,15 @@ function registerTools(server, postmarkClient) {
 
       const data = await response.json();
       console.error('Stats retrieved successfully');
-      
+
       const sent = data.Sent || 0;
       const tracked = data.Tracked || 0;
       const uniqueOpens = data.UniqueOpens || 0;
       const totalTrackedLinks = data.TotalTrackedLinksSent || 0;
       const uniqueLinksClicked = data.UniqueLinksClicked || 0;
-      
       const openRate = tracked > 0 ? ((uniqueOpens / tracked) * 100).toFixed(1) : '0.0';
       const clickRate = totalTrackedLinks > 0 ? ((uniqueLinksClicked / totalTrackedLinks) * 100).toFixed(1) : '0.0';
-      
+
       return {
         content: [{
           type: "text",
@@ -280,8 +269,7 @@ function registerTools(server, postmarkClient) {
   );
 }
 
-// Start the server
 main().catch((error) => {
-  console.error('💥 Failed to start server:', error.message);
+  console.error('[ERROR] Failed to start server: ', error.message);
   process.exit(1);
 });

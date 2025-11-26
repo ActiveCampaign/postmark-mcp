@@ -3,8 +3,8 @@ package-lock.json
 yarn.lock
 bun.lock
 .env
-.env.local
-.env*.local
+.env.*
+!.env.example
 *.log
 npm-debug.log*
 yarn-debug.log*
