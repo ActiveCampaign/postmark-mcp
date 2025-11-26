@@ -1,6 +1,6 @@
 {
   "name": "@activecampaign/postmark-mcp",
-  "version": "1.0.1",
+  "version": "1.0.0",
   "description": "Official Postmark MCP server for sending emails via Claude and AI assistants",
   "keywords": ["postmark", "email", "mcp", "ai"],
   "author": "Jabal Torres",
