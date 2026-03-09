@@ -1,8 +1,9 @@
 {
   "name": "@activecampaign/postmark-mcp",
-  "version": "1.0.0",
+  "version": "1.1.0",
+  "mcpName": "io.github.activecampaign/postmark",
   "description": "Official Postmark MCP server for sending emails via Claude and AI assistants",
-  "keywords": ["postmark", "activecampaign", "email", "mcp", "model-context-protocol", "claude", "cursor", "ai"],
+  "keywords": ["postmark", "activecampaign", "email", "mcp", "model-context-protocol", "claude", "cursor", "ai", "bounces", "suppressions", "stats"],
   "author": "Jabal Torres",
   "license": "MIT",
   "repository": {
@@ -20,6 +21,7 @@
   },
   "files": [
     "index.js",
+    "server.json",
     "README.md",
     "LICENSE"
   ],
