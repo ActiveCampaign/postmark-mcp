@@ -1,13 +1,18 @@
 # Official Postmark MCP Server&nbsp;&nbsp;&nbsp;[![NPM Version](https://img.shields.io/npm/v/@activecampaign/postmark-mcp.svg)](https://www.npmjs.com/package/@activecampaign/postmark-mcp)&nbsp;&nbsp;![MIT licensed](https://img.shields.io/npm/l/%40modelcontextprotocol%2Fsdk)
 
-Send emails with Postmark using Claude and other MCP-compatible AI assistants.
+Send emails, manage bounces, handle suppressions, and track delivery stats with Postmark using Claude and other MCP-compatible AI assistants.
 
 ## Features
-- Exposes a Model Context Protocol (MCP) server for sending emails via your [Postmark account](https://account.postmarkapp.com/sign_up)
+- Exposes a Model Context Protocol (MCP) server for interacting with [Postmark](https://account.postmarkapp.com/sign_up)
+- **Email sending** — Send emails directly or via templates
+- **Bounce management** — List, inspect, and reactivate bounced addresses
+- **Suppression management** — View, create, and delete suppressions
+- **Delivery statistics** — Track bounce rates, spam complaints, and overall delivery stats
 - Simple configuration via environment variables
 - Comprehensive error handling and graceful shutdown
 - Secure logging practices (no sensitive data exposure)
 - Automatic email tracking configuration
+- Ready for [MCP Registry](https://registry.modelcontextprotocol.io) publishing
 
 ## Useful Docs
 - [📒 API Documentation](https://postmarkapp.com/developer)
@@ -112,6 +117,16 @@ This section provides a complete reference for the Postmark MCP server tools inc
   - [listTemplates](#3-listtemplates)
 - [Statistics & Tracking Tools](#statistics--tracking-tools)
   - [getDeliveryStats](#4-getdeliverystats)
+  - [getBounceStats](#8-getbouncestats)
+  - [getSpamStats](#9-getspamstats)
+- [Bounce Management Tools](#bounce-management-tools)
+  - [getBounces](#5-getbounces)
+  - [getBounce](#6-getbounce)
+  - [activateBounce](#7-activatebounce)
+- [Suppression Management Tools](#suppression-management-tools)
+  - [getSuppressions](#10-getsuppressions)
+  - [createSuppressions](#11-createsuppressions)
+  - [deleteSuppressions](#12-deletesuppressions)
 
 ## Email Management Tools
 ### 1. sendEmail
@@ -234,6 +249,247 @@ Click Rate: 15.2% (15/99 tracked links)
 Period: 2025-05-01 to 2025-05-15
 Tag: marketing
 ```
+
+## Bounce Management Tools
+### 5. getBounces
+Search and list bounced emails with optional filters.
+
+**Example Prompt:**
+```
+Show me all hard bounces from the last week.
+```
+
+**Expected Payload:**
+```json
+{
+  "count": 50, // Optional, 1-500, default 25
+  "offset": 0, // Optional
+  "type": "HardBounce", // Optional: HardBounce, SoftBounce, SpamNotification, Transient
+  "inactive": true, // Optional
+  "emailFilter": "example.com", // Optional, partial match
+  "tag": "marketing", // Optional
+  "fromDate": "2025-05-01", // Optional, YYYY-MM-DD
+  "toDate": "2025-05-15", // Optional, YYYY-MM-DD
+  "messageStream": "outbound" // Optional
+}
+```
+
+**Response Format:**
+```
+Found 3 bounces (showing 3):
+
+• recipient@example.com
+  - Type: HardBounce
+  - Description: The server was unable to deliver your message
+  - Date: 2025-05-10T14:29:09Z
+  - Inactive: true
+  - ID: 1234567890
+  - MessageStream: outbound
+```
+
+### 6. getBounce
+Get detailed information about a specific bounce.
+
+**Example Prompt:**
+```
+Show me the details of bounce ID 1234567890.
+```
+
+**Expected Payload:**
+```json
+{
+  "bounceId": 1234567890
+}
+```
+
+**Response Format:**
+```
+Bounce Details
+
+Email: recipient@example.com
+Type: HardBounce
+Description: The server was unable to deliver your message
+Details: no such user
+Date: 2025-05-10T14:29:09Z
+Inactive: true
+Can Activate: true
+ID: 1234567890
+MessageStream: outbound
+Subject: Order Confirmation
+ServerID: 12345678
+```
+
+### 7. activateBounce
+Reactivate a bounced email address so emails can be sent to it again.
+
+**Example Prompt:**
+```
+Reactivate bounce ID 1234567890 so we can send emails to that address again.
+```
+
+**Expected Payload:**
+```json
+{
+  "bounceId": 1234567890
+}
+```
+
+**Response Format:**
+```
+Bounce activated successfully!
+
+Message: OK
+Email: recipient@example.com
+ID: 1234567890
+Inactive: false
+```
+
+### 8. getBounceStats
+Get bounce statistics broken down by day.
+
+**Example Prompt:**
+```
+Show me bounce statistics for the last month.
+```
+
+**Expected Payload:**
+```json
+{
+  "tag": "marketing", // Optional
+  "fromDate": "2025-05-01", // Optional, YYYY-MM-DD
+  "toDate": "2025-05-31" // Optional, YYYY-MM-DD
+}
+```
+
+**Response Format:**
+```
+Bounce Statistics
+
+Period: 2025-05-01 to 2025-05-31
+
+Daily breakdown:
+  2025-05-01: Hard=0, Soft=1, Transient=0, SMTPApiError=0
+  2025-05-02: Hard=2, Soft=0, Transient=1, SMTPApiError=0
+```
+
+### 9. getSpamStats
+Get spam complaint statistics broken down by day.
+
+**Example Prompt:**
+```
+Show me spam complaint stats for this month.
+```
+
+**Expected Payload:**
+```json
+{
+  "tag": "marketing", // Optional
+  "fromDate": "2025-05-01", // Optional, YYYY-MM-DD
+  "toDate": "2025-05-31" // Optional, YYYY-MM-DD
+}
+```
+
+**Response Format:**
+```
+Spam Complaint Statistics
+
+Period: 2025-05-01 to 2025-05-31
+
+Daily breakdown:
+  2025-05-01: SpamComplaint=0
+  2025-05-02: SpamComplaint=1
+```
+
+## Suppression Management Tools
+### 10. getSuppressions
+List suppressed email addresses in a message stream.
+
+**Example Prompt:**
+```
+Show me all suppressed email addresses on the outbound stream.
+```
+
+**Expected Payload:**
+```json
+{
+  "messageStream": "outbound", // Optional, default: outbound
+  "suppressionReason": "HardBounce", // Optional: ManualSuppression, HardBounce, SpamComplaint
+  "origin": "Recipient", // Optional: Recipient, Customer, Admin
+  "emailAddress": "example.com" // Optional, filter by address
+}
+```
+
+**Response Format:**
+```
+Found 2 suppressions in stream "outbound":
+
+• blocked@example.com
+  - Reason: HardBounce
+  - Origin: Recipient
+  - Created: 2025-05-10T14:29:09Z
+
+• spam@example.com
+  - Reason: SpamComplaint
+  - Origin: Recipient
+  - Created: 2025-05-08T10:15:00Z
+```
+
+### 11. createSuppressions
+Suppress one or more email addresses to prevent sending to them.
+
+**Example Prompt:**
+```
+Suppress the email addresses spam@example.com and invalid@example.com on the outbound stream.
+```
+
+**Expected Payload:**
+```json
+{
+  "messageStream": "outbound", // Optional, default: outbound
+  "emailAddresses": ["spam@example.com", "invalid@example.com"]
+}
+```
+
+**Response Format:**
+```
+Suppression results:
+
+• spam@example.com: Suppressed
+• invalid@example.com: Suppressed
+```
+
+### 12. deleteSuppressions
+Remove suppressions to allow sending to those addresses again.
+
+**Example Prompt:**
+```
+Unsuppress customer@example.com so we can send them emails again.
+```
+
+**Expected Payload:**
+```json
+{
+  "messageStream": "outbound", // Optional, default: outbound
+  "emailAddresses": ["customer@example.com"]
+}
+```
+
+**Response Format:**
+```
+Unsuppression results:
+
+• customer@example.com: Deleted
+```
+
+## MCP Registry
+
+This server is ready for publishing to the [MCP Registry](https://registry.modelcontextprotocol.io). A `server.json` file is included with the required metadata. To publish:
+
+1. Install the `mcp-publisher` CLI tool
+2. Authenticate: `mcp-publisher login github`
+3. Publish: `mcp-publisher publish`
+
+For full instructions, see the [MCP Registry Quickstart](https://modelcontextprotocol.io/docs/registry/publishing/quickstart).
 
 ## Implementation Details
 ### Automatic Configuration
