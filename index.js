@@ -7,17 +7,61 @@
  */
 
 import 'dotenv/config';
+import { createRequire } from 'module';
+import { randomUUID } from 'crypto';
 import fetch from 'node-fetch';
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import postmark from "postmark";
+
+const require = createRequire(import.meta.url);
+const { version: clientVersion } = require('./package.json');
+
+const POSTMARK_CLIENT_ID = 'postmark-mcp';
+const POSTMARK_API_BASE = 'https://api.postmarkapp.com';
 
 const serverToken = process.env.POSTMARK_SERVER_TOKEN;
 const defaultSender = process.env.DEFAULT_SENDER_EMAIL;
 const defaultMessageStream = process.env.DEFAULT_MESSAGE_STREAM;
 
-// Initialize Postmark client and MCP server
+/** Headers sent on all requests to Postmark API for client identification and correlation. */
+function postmarkRequestHeaders() {
+  return {
+    'X-Postmark-Client': POSTMARK_CLIENT_ID,
+    'X-Postmark-Client-Version': clientVersion,
+    'X-Postmark-Correlation-Id': randomUUID()
+  };
+}
+
+/** Make a request to the Postmark API with auth and client identification headers. */
+async function postmarkRequest(path, options = {}) {
+  const url = path.startsWith('http') ? path : `${POSTMARK_API_BASE}${path}`;
+  const headers = {
+    'Accept': 'application/json',
+    'X-Postmark-Server-Token': serverToken,
+    ...postmarkRequestHeaders(),
+    ...options.headers
+  };
+  if (options.body && !headers['Content-Type']) {
+    headers['Content-Type'] = 'application/json';
+  }
+  const response = await fetch(url, {
+    ...options,
+    headers
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    let message = response.statusText;
+    try {
+      const data = JSON.parse(text);
+      if (data.Message) message = data.Message;
+    } catch (_) {}
+    throw new Error(`API request failed: ${response.status} ${message}`);
+  }
+  return text ? JSON.parse(text) : null;
+}
+
+// Initialize MCP server and verify Postmark token
 async function initializeServices() {
   try {
     if (!serverToken) {
@@ -39,32 +83,25 @@ async function initializeServices() {
     console.error('Default sender: ', defaultSender);
     console.error('Message stream: ', defaultMessageStream);
 
-    const client = new postmark.ServerClient(serverToken);
-    
-    // Verify Postmark client by making a test API call
-    await client.getServer();
+    await postmarkRequest('/server');
 
     const mcpServer = new McpServer({
       name: "postmark-mcp",
       version: "1.0.0"
     });
 
-    return { postmarkClient: client, mcpServer };
+    return { mcpServer };
   } catch (error) {
-    if (error.code || error.message) {
-      throw new Error(`Initialization failed: ${error.code ? `${error.code} - ` : ''}${error.message}`);
-    }
-
-    throw new Error('Initialization failed: An unexpected error occurred');
+    throw new Error(`Initialization failed: ${error.message}`);
   }
 }
 
 // Start the server
 async function main() {
   try {
-    const { postmarkClient, mcpServer: server } = await initializeServices();
+    const { mcpServer: server } = await initializeServices();
 
-    registerTools(server, postmarkClient);
+    registerTools(server);
 
     console.error('Connecting to MCP transport..');
     const transport = new StdioServerTransport();
@@ -107,7 +144,7 @@ process.on('unhandledRejection', (reason) => {
 });
 
 // Move tool registration to a separate function for better organization
-function registerTools(server, postmarkClient) {
+function registerTools(server) {
   // Define and register the sendEmail tool
   server.tool(
     "sendEmail",
@@ -120,7 +157,7 @@ function registerTools(server, postmarkClient) {
       tag: z.string().optional().describe("Optional tag for categorization")
     },
     async ({ to, subject, textBody, htmlBody, from, tag }) => {
-      const emailData = {
+      const body = {
         From: from || defaultSender,
         To: to,
         Subject: subject,
@@ -129,12 +166,14 @@ function registerTools(server, postmarkClient) {
         TrackOpens: true,
         TrackLinks: "HtmlAndText"
       };
-
-      if (htmlBody) emailData.HtmlBody = htmlBody;
-      if (tag) emailData.Tag = tag;
+      if (htmlBody) body.HtmlBody = htmlBody;
+      if (tag) body.Tag = tag;
 
       console.error('Sending email..', { to, subject });
-      const result = await postmarkClient.sendEmail(emailData);
+      const result = await postmarkRequest('/email', { method: 'POST', body: JSON.stringify(body) });
+      if (result.ErrorCode !== 0) {
+        throw new Error(result.Message || 'Failed to send email');
+      }
       console.error('Email sent successfully: ', result.MessageID);
 
       return {
@@ -162,7 +201,7 @@ function registerTools(server, postmarkClient) {
         throw new Error("Either templateId or templateAlias must be provided");
       }
 
-      const emailData = {
+      const body = {
         From: from || defaultSender,
         To: to,
         TemplateModel: templateModel,
@@ -170,22 +209,20 @@ function registerTools(server, postmarkClient) {
         TrackOpens: true,
         TrackLinks: "HtmlAndText"
       };
-
-      if (templateId) {
-        emailData.TemplateId = templateId;
-      } else {
-        emailData.TemplateAlias = templateAlias;
-      }
-
-      if (tag) emailData.Tag = tag;
+      if (templateId) body.TemplateId = templateId;
+      else body.TemplateAlias = templateAlias;
+      if (tag) body.Tag = tag;
 
       console.error('Sending template email..', { to, templateId: templateId || templateAlias });
-      const result = await postmarkClient.sendEmailWithTemplate(emailData);
+      const result = await postmarkRequest('/email/withTemplate', { method: 'POST', body: JSON.stringify(body) });
+      if (result.ErrorCode !== 0) {
+        throw new Error(result.Message || 'Failed to send template email');
+      }
       console.error('Template email sent successfully: ', result.MessageID);
-      
+
       return {
         content: [{
-          type: "text", 
+          type: "text",
           text: `Template email sent successfully!\nMessageID: ${result.MessageID}\nTo: ${to}\nTemplate: ${templateId || templateAlias}`
         }]
       };
@@ -198,17 +235,18 @@ function registerTools(server, postmarkClient) {
     {},
     async () => {
       console.error('Fetching templates..');
-      const result = await postmarkClient.getTemplates();
-      console.error(`Found ${result.Templates.length} templates`);
+      const result = await postmarkRequest('/templates?count=100&offset=0');
+      const templates = result.Templates || [];
+      console.error(`Found ${templates.length} templates`);
 
-      const templateList = result.Templates.map(t => 
-        `• **${t.Name}**\n  - ID: ${t.TemplateId}\n  - Alias: ${t.Alias || 'none'}\n  - Subject: ${t.Subject || 'none'}`
+      const templateList = templates.map(t =>
+        `• **${t.Name}**\n  - ID: ${t.TemplateId}\n  - Alias: ${t.Alias || 'none'}\n  - Subject: ${t.Subject ?? 'none'}`
       ).join('\n\n');
 
       return {
         content: [{
           type: "text",
-          text: `Found ${result.Templates.length} templates:\n\n${templateList}`
+          text: `Found ${templates.length} templates:\n\n${templateList}`
         }]
       };
     }
@@ -228,22 +266,11 @@ function registerTools(server, postmarkClient) {
       if (toDate) query.push(`todate=${encodeURIComponent(toDate)}`);
       if (tag) query.push(`tag=${encodeURIComponent(tag)}`);
 
-      const url = `https://api.postmarkapp.com/stats/outbound${query.length ? '?' + query.join('&') : ''}`;
+      const url = `${POSTMARK_API_BASE}/stats/outbound${query.length ? '?' + query.join('&') : ''}`;
 
       console.error('Fetching delivery stats..');
 
-      const response = await fetch(url, {
-        headers: {
-          "Accept": "application/json",
-          "X-Postmark-Server-Token": serverToken
-        }
-      });
-
-      if (!response.ok) {
-        throw new Error(`API request failed: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
+      const data = await postmarkRequest(url);
       console.error('Stats retrieved successfully');
 
       const sent = data.Sent || 0;

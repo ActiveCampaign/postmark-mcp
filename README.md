@@ -236,6 +236,17 @@ Tag: marketing
 ```
 
 ## Implementation Details
+### API Request Headers
+All requests to the Postmark API that are made directly by this server include the following headers for client identification and correlation:
+
+| Header | Description |
+|--------|-------------|
+| `X-Postmark-Client` | Client identifier: `postmark-mcp` |
+| `X-Postmark-Client-Version` | Version of this MCP server (matches package version) |
+| `X-Postmark-Correlation-Id` | A unique ID per request (UUID v4) for correlating requests with your logs or support. The API may use this in the future; it is safe to send now. |
+
+These headers are sent on **every** request to the Postmark API. This server uses its own HTTP client (no postmark npm package) so that MCP traffic is identified as `postmark-mcp` and not as the Node.js SDK.
+
 ### Automatic Configuration
 All emails are automatically configured with:
 - `TrackOpens: true`
