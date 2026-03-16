@@ -24,6 +24,7 @@ const serverToken = process.env.POSTMARK_SERVER_TOKEN;
 const defaultSender = process.env.DEFAULT_SENDER_EMAIL;
 const defaultMessageStream = process.env.DEFAULT_MESSAGE_STREAM;
 
+
 /** Headers sent on all requests to Postmark API for client identification and correlation. */
 function postmarkRequestHeaders() {
   return {
@@ -42,14 +43,17 @@ async function postmarkRequest(path, options = {}) {
     ...postmarkRequestHeaders(),
     ...options.headers
   };
+
   if (options.body && !headers['Content-Type']) {
     headers['Content-Type'] = 'application/json';
   }
+
   const response = await fetch(url, {
     ...options,
     headers
   });
   const text = await response.text();
+
   if (!response.ok) {
     let message = response.statusText;
     try {
@@ -58,6 +62,7 @@ async function postmarkRequest(path, options = {}) {
     } catch (_) {}
     throw new Error(`API request failed: ${response.status} ${message}`);
   }
+
   return text ? JSON.parse(text) : null;
 }
 
@@ -112,6 +117,7 @@ async function main() {
 
     process.on('SIGTERM', () => handleShutdown(server));
     process.on('SIGINT', () => handleShutdown(server));
+
   } catch (error) {
     console.error('Server initialization failed: ', error.message);
     process.exit(1);
@@ -166,6 +172,7 @@ function registerTools(server) {
         TrackOpens: true,
         TrackLinks: "HtmlAndText"
       };
+
       if (htmlBody) body.HtmlBody = htmlBody;
       if (tag) body.Tag = tag;
 
@@ -174,6 +181,7 @@ function registerTools(server) {
       if (result.ErrorCode !== 0) {
         throw new Error(result.Message || 'Failed to send email');
       }
+
       console.error('Email sent successfully: ', result.MessageID);
 
       return {
@@ -209,6 +217,7 @@ function registerTools(server) {
         TrackOpens: true,
         TrackLinks: "HtmlAndText"
       };
+
       if (templateId) body.TemplateId = templateId;
       else body.TemplateAlias = templateAlias;
       if (tag) body.Tag = tag;
@@ -218,6 +227,7 @@ function registerTools(server) {
       if (result.ErrorCode !== 0) {
         throw new Error(result.Message || 'Failed to send template email');
       }
+
       console.error('Template email sent successfully: ', result.MessageID);
 
       return {
