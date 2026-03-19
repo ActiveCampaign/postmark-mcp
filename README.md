@@ -1,4 +1,4 @@
-# Official Postmark MCP Server&nbsp;&nbsp;&nbsp;[![NPM Version](https://img.shields.io/npm/v/@activecampaign/postmark-mcp.svg)](https://www.npmjs.com/package/@activecampaign/postmark-mcp)&nbsp;&nbsp;![MIT licensed](https://img.shields.io/npm/l/%40modelcontextprotocol%2Fsdk)
+# Official Postmark MCP Server&nbsp;&nbsp;&nbsp;[![NPM Version](https://img.shields.io/npm/v/@activecampaign/postmark-mcp.svg)](https://www.npmjs.com/package/@activecampaign/postmark-mcp)&nbsp;&nbsp;![MIT licensed](https://img.shields.io/npm/l/%40modelcontextprotocol%2Fsdk)&nbsp;&nbsp;[![MCPAmpel](https://img.shields.io/endpoint?url=https://mcpampel.com/badge/ActiveCampaign/postmark-mcp.json)](https://mcpampel.com/repo/ActiveCampaign/postmark-mcp)
 
 Send emails with Postmark using Claude and other MCP-compatible AI assistants.
 
