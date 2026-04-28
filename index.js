@@ -70,7 +70,7 @@ async function main() {
     await server.connect(transport);
 
     console.error('Postmark MCP server is running and ready!');
-    console.error('Available tools (22): sendEmail, sendEmailWithTemplate, ' +
+    console.error('Available tools (24): sendEmail, sendEmailWithTemplate, sendBatch, sendBatchWithTemplate, ' +
       'listTemplates, getTemplate, createTemplate, editTemplate, deleteTemplate, validateTemplate, ' +
       'searchOutboundMessages, getMessageDetails, diagnoseDelivery, ' +
       'searchBounces, getBounceDump, activateBounce, ' +
@@ -353,6 +353,133 @@ function registerTools(server, postmarkClient) {
           text: `Template email sent successfully!\nMessageID: ${result.MessageID}\nTo: ${to}\nTemplate: ${templateId || templateAlias}`
         }]
       };
+    }
+  );
+
+  // ─────────────── Batch send ───────────────
+
+  // Format batch send results into successes / failures summary.
+  // Postmark returns one MessageSendingResponse per input message; ErrorCode
+  // 0 indicates success. Failed sends still come back with `To` and a
+  // `Message` describing why.
+  const formatBatchResults = (results) => {
+    const successes = results.filter(r => r.ErrorCode === 0);
+    const failures = results.filter(r => r.ErrorCode !== 0);
+    const lines = [`Sent ${successes.length}/${results.length} successfully` +
+      (failures.length ? ` (${failures.length} failed)` : '')];
+
+    if (failures.length) {
+      lines.push('', 'Failures:');
+      failures.slice(0, 20).forEach(f => {
+        lines.push(`  - ${f.To || '(unknown)'} — ${f.ErrorCode}: ${f.Message}`);
+      });
+      if (failures.length > 20) lines.push(`  - ... and ${failures.length - 20} more`);
+    }
+
+    if (successes.length) {
+      lines.push('', `Successes${successes.length > 10 ? ' (first 10 shown)' : ''}:`);
+      successes.slice(0, 10).forEach(s => {
+        lines.push(`  - ${s.To} — ${s.MessageID}`);
+      });
+      if (successes.length > 10) lines.push(`  - ... and ${successes.length - 10} more successful sends`);
+    }
+
+    return lines.join('\n');
+  };
+
+  server.tool(
+    "sendBatch",
+    {
+      messages: z.array(z.object({
+        to: z.string().email().describe("Recipient email address"),
+        subject: z.string().describe("Email subject"),
+        textBody: z.string().describe("Plain text body"),
+        htmlBody: z.string().optional().describe("HTML body"),
+        from: z.string().email().optional().describe("Sender (defaults to DEFAULT_SENDER_EMAIL)"),
+        cc: z.string().optional().describe("CC recipient(s), comma-separated"),
+        bcc: z.string().optional().describe("BCC recipient(s), comma-separated"),
+        replyTo: z.string().email().optional().describe("Reply-To address"),
+        tag: z.string().optional().describe("Tag for categorization")
+      })).min(1).max(500).describe("Up to 500 messages to send in a single request")
+    },
+    async ({ messages }) => {
+      const payload = messages.map(m => {
+        const msg = {
+          From: m.from || defaultSender,
+          To: m.to,
+          Subject: m.subject,
+          TextBody: m.textBody,
+          MessageStream: defaultMessageStream,
+          TrackOpens: true,
+          TrackLinks: "HtmlAndText"
+        };
+        if (m.htmlBody) msg.HtmlBody = m.htmlBody;
+        if (m.cc) msg.Cc = m.cc;
+        if (m.bcc) msg.Bcc = m.bcc;
+        if (m.replyTo) msg.ReplyTo = m.replyTo;
+        if (m.tag) msg.Tag = m.tag;
+        return msg;
+      });
+
+      console.error('Sending batch..', { count: payload.length });
+      const results = await postmarkClient.sendEmailBatch(payload);
+      const failures = results.filter(r => r.ErrorCode !== 0).length;
+      console.error(`Batch sent: ${results.length - failures}/${results.length} succeeded`);
+
+      return { content: [{ type: "text", text: formatBatchResults(results) }] };
+    }
+  );
+
+  server.tool(
+    "sendBatchWithTemplate",
+    {
+      templateId: z.number().int().optional().describe("Template ID (use either this or templateAlias)"),
+      templateAlias: z.string().optional().describe("Template alias (use either this or templateId)"),
+      from: z.string().email().optional().describe("Default sender for all messages (defaults to DEFAULT_SENDER_EMAIL)"),
+      tag: z.string().optional().describe("Default tag applied to all messages (overridable per-recipient)"),
+      recipients: z.array(z.object({
+        to: z.string().email().describe("Recipient email address"),
+        templateModel: z.object({}).passthrough().describe("Per-recipient template variables"),
+        from: z.string().email().optional().describe("Override sender for this recipient"),
+        cc: z.string().optional().describe("CC recipient(s), comma-separated"),
+        bcc: z.string().optional().describe("BCC recipient(s), comma-separated"),
+        replyTo: z.string().email().optional().describe("Reply-To address"),
+        tag: z.string().optional().describe("Override tag for this recipient")
+      })).min(1).max(500).describe("Up to 500 recipients, each with their own template model")
+    },
+    async ({ templateId, templateAlias, from, tag, recipients }) => {
+      if (!templateId && !templateAlias) {
+        throw new Error("Either templateId or templateAlias must be provided");
+      }
+      if (templateId && templateAlias) {
+        throw new Error("Provide only one of templateId or templateAlias, not both");
+      }
+
+      const payload = recipients.map(r => {
+        const msg = {
+          From: r.from || from || defaultSender,
+          To: r.to,
+          TemplateModel: r.templateModel,
+          MessageStream: defaultMessageStream,
+          TrackOpens: true,
+          TrackLinks: "HtmlAndText"
+        };
+        if (templateId) msg.TemplateId = templateId;
+        else msg.TemplateAlias = templateAlias;
+        if (r.cc) msg.Cc = r.cc;
+        if (r.bcc) msg.Bcc = r.bcc;
+        if (r.replyTo) msg.ReplyTo = r.replyTo;
+        const effectiveTag = r.tag ?? tag;
+        if (effectiveTag) msg.Tag = effectiveTag;
+        return msg;
+      });
+
+      console.error('Sending template batch..', { count: payload.length, template: templateId || templateAlias });
+      const results = await postmarkClient.sendEmailBatchWithTemplates(payload);
+      const failures = results.filter(r => r.ErrorCode !== 0).length;
+      console.error(`Template batch sent: ${results.length - failures}/${results.length} succeeded`);
+
+      return { content: [{ type: "text", text: formatBatchResults(results) }] };
     }
   );
 

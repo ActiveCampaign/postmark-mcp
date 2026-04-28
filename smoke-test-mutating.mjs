@@ -96,6 +96,31 @@ try {
   });
   log("sendEmailWithTemplate (real send)", r.ok, r.text);
 
+  // ─────────── Batch sends ───────────
+  r = await call("sendBatch", {
+    messages: [
+      { to: RECIPIENT, from: SENDER, subject: `MCP batch #1 ${ts}`, textBody: "Batch test 1", tag: "mcp-smoke-test" },
+      { to: RECIPIENT, from: SENDER, subject: `MCP batch #2 ${ts}`, textBody: "Batch test 2", tag: "mcp-smoke-test" },
+      { to: RECIPIENT, from: SENDER, subject: `MCP batch #3 ${ts}`, textBody: "Batch test 3", tag: "mcp-smoke-test" },
+    ],
+  });
+  log("sendBatch (3 messages, formatter renders)",
+    r.ok && /Sent \d+\/3/.test(r.text),
+    r.text);
+
+  r = await call("sendBatchWithTemplate", {
+    templateAlias: TEMPLATE_ALIAS,
+    from: SENDER,
+    tag: "mcp-smoke-test",
+    recipients: [
+      { to: RECIPIENT, templateModel: { name: "Jabal (batch 1)" } },
+      { to: RECIPIENT, templateModel: { name: "Jabal (batch 2)" } },
+    ],
+  });
+  log("sendBatchWithTemplate (real sends)",
+    r.ok && /Sent 2\/2/.test(r.text),
+    r.text);
+
   // ─────────── Webhook lifecycle ───────────
   r = await call("createWebhook", {
     url: WEBHOOK_URL,

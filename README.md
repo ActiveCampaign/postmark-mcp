@@ -4,7 +4,7 @@ Send emails with Postmark using Claude and other MCP-compatible AI assistants.
 
 ## Features
 - Exposes a Model Context Protocol (MCP) server backed by your [Postmark account](https://account.postmarkapp.com/sign_up)
-- 22 tools spanning email sending, templates (CRUD + validation), message search, delivery diagnostics, bounces, suppressions, stats, server info, and webhooks
+- 24 tools spanning email sending (single + batch), templates (CRUD + validation), message search, delivery diagnostics, bounces, suppressions, stats, server info, and webhooks
 - Simple configuration via environment variables
 - Comprehensive error handling and graceful shutdown
 - Secure logging practices (no sensitive data exposure)
@@ -111,12 +111,14 @@ After installing the MCP, update your configuration to set:
 ```
 
 ## Tools
-This section provides a complete reference for the Postmark MCP server tools including example prompts and payloads. The server registers **22 tools** organized into eight categories.
+This section provides a complete reference for the Postmark MCP server tools including example prompts and payloads. The server registers **24 tools** organized into eight categories.
 
 ### Table of Contents
 - [Email](#email)
   - [sendEmail](#sendemail)
   - [sendEmailWithTemplate](#sendemailwithtemplate)
+  - [sendBatch](#sendbatch)
+  - [sendBatchWithTemplate](#sendbatchwithtemplate)
 - [Templates](#templates)
   - [listTemplates](#listtemplates)
   - [getTemplate](#gettemplate)
@@ -210,6 +212,70 @@ MessageID: 0a1b2c3d-...
 To: customer@example.com
 Template: welcome
 ```
+
+### sendBatch
+Sends up to 500 emails in a single API call. Each message is fully independent (its own recipient, subject, body). Postmark's [bulk email API](https://postmarkapp.com/developer/api/bulk-email) handles the underlying batch — this tool wraps it and synthesizes a per-message success/failure summary.
+
+**Expected Payload:**
+```json
+{
+  "messages": [
+    {
+      "to": "alice@example.com",
+      "subject": "Order #1234 confirmed",
+      "textBody": "Thanks Alice — your order is on its way.",
+      "tag": "order-confirmation"
+    },
+    {
+      "to": "bob@example.com",
+      "subject": "Order #1235 confirmed",
+      "textBody": "Thanks Bob — your order is on its way.",
+      "tag": "order-confirmation"
+    }
+  ]
+}
+```
+
+Per-message fields: `to`, `subject`, `textBody` are required. `htmlBody`, `from`, `cc`, `bcc`, `replyTo`, and `tag` are optional. If `from` is omitted on a message, `DEFAULT_SENDER_EMAIL` is used.
+
+**Response:**
+```
+Sent 2/2 successfully
+
+Successes:
+  - alice@example.com — abc-123-def
+  - bob@example.com — abc-456-ghi
+```
+
+When some messages fail at submission (e.g., suppressed recipients), failures are listed first with their `ErrorCode` and reason:
+```
+Sent 8/10 successfully (2 failed)
+
+Failures:
+  - blocked@example.com — 406: Address has been suppressed.
+  - bad@example.com — 300: Inactive recipient
+...
+```
+
+### sendBatchWithTemplate
+Sends up to 500 templated emails — same template, per-recipient template models. Ideal for "render this onboarding template for each new user" flows.
+
+**Expected Payload:**
+```json
+{
+  "templateAlias": "welcome",
+  "from": "hello@yourapp.com",
+  "tag": "onboarding",
+  "recipients": [
+    { "to": "alice@example.com", "templateModel": { "name": "Alice", "plan": "Pro" } },
+    { "to": "bob@example.com", "templateModel": { "name": "Bob", "plan": "Free" } }
+  ]
+}
+```
+
+Provide **either** `templateId` (number) **or** `templateAlias` (string). Top-level `from` and `tag` apply to all recipients but can be overridden per-recipient. Each recipient also accepts optional `cc`, `bcc`, and `replyTo`.
+
+**Response:** same format as `sendBatch`.
 
 ---
 

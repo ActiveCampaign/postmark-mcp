@@ -25,7 +25,7 @@ const record = (name, ok, detail) => {
 // 1. tools/list
 const toolList = await client.listTools();
 const toolNames = toolList.tools.map(t => t.name).sort();
-const expected = 22;
+const expected = 24;
 record(`tools/list (${expected} expected)`, toolNames.length === expected, `${toolNames.length} tools: ${toolNames.join(", ")}`);
 
 async function call(name, args = {}) {

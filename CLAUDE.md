@@ -27,8 +27,8 @@ Communication uses stdio transport (stdin/stdout), not HTTP. All `console.error`
 
 ## MCP Tools Registered
 
-The server exposes 22 tools across these categories:
-- **Email:** sendEmail, sendEmailWithTemplate
+The server exposes 24 tools across these categories:
+- **Email:** sendEmail, sendEmailWithTemplate, sendBatch, sendBatchWithTemplate
 - **Templates:** listTemplates, getTemplate, createTemplate, editTemplate, deleteTemplate, validateTemplate
 - **Messages:** searchOutboundMessages, getMessageDetails
 - **Diagnostics:** diagnoseDelivery
@@ -36,6 +36,8 @@ The server exposes 22 tools across these categories:
 - **Suppressions:** listSuppressions, createSuppressions, deleteSuppressions
 - **Stats & Server:** getDeliveryStats, getServerInfo
 - **Webhooks:** listWebhooks, createWebhook, deleteWebhook
+
+`sendBatch` and `sendBatchWithTemplate` wrap Postmark's bulk email API (`/email/batch`, `/email/batchWithTemplates`), each accepting up to 500 messages. Both share a `formatBatchResults` helper defined inside `registerTools` that splits the SDK response by `ErrorCode` (0 = success, non-zero = failure) and renders a summary with capped success/failure lists. `sendBatchWithTemplate` accepts a top-level `from` / `tag` that's overridable per recipient — keep that override semantics if extending.
 
 `diagnoseDelivery` is a **composite tool** — it does not mirror a single Postmark endpoint. Instead it runs `getOutboundMessages` (or `getOutboundMessageDetails`), `getSuppressions`, and `getBounces` in parallel for the given recipient, then synthesizes a plain-English recommendation. When adding new diagnostic tools, follow the same pattern: parallelize independent lookups via `Promise.all`, swallow individual failures with `.catch(() => fallback)` so one 404 doesn't sink the whole diagnosis, and end with a `Recommended action` block that interprets the data.
 
