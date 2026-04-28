@@ -4,7 +4,7 @@ Send emails with Postmark using Claude and other MCP-compatible AI assistants.
 
 ## Features
 - Exposes a Model Context Protocol (MCP) server backed by your [Postmark account](https://account.postmarkapp.com/sign_up)
-- 21 tools spanning email sending, templates (CRUD + validation), message search, bounces, suppressions, stats, server info, and webhooks
+- 22 tools spanning email sending, templates (CRUD + validation), message search, delivery diagnostics, bounces, suppressions, stats, server info, and webhooks
 - Simple configuration via environment variables
 - Comprehensive error handling and graceful shutdown
 - Secure logging practices (no sensitive data exposure)
@@ -111,7 +111,7 @@ After installing the MCP, update your configuration to set:
 ```
 
 ## Tools
-This section provides a complete reference for the Postmark MCP server tools including example prompts and payloads. The server registers **21 tools** organized into seven categories.
+This section provides a complete reference for the Postmark MCP server tools including example prompts and payloads. The server registers **22 tools** organized into eight categories.
 
 ### Table of Contents
 - [Email](#email)
@@ -127,6 +127,8 @@ This section provides a complete reference for the Postmark MCP server tools inc
 - [Messages](#messages)
   - [searchOutboundMessages](#searchoutboundmessages)
   - [getMessageDetails](#getmessagedetails)
+- [Diagnostics](#diagnostics)
+  - [diagnoseDelivery](#diagnosedelivery)
 - [Bounces](#bounces)
   - [searchBounces](#searchbounces)
   - [getBounceDump](#getbouncedump)
@@ -299,6 +301,56 @@ Searches the outbound message history.
 Retrieves full details and event timeline for a single outbound message.
 
 **Payload:** `{ "messageId": "0a1b2c3d-..." }`
+
+---
+
+## Diagnostics
+
+### diagnoseDelivery
+Composite triage tool. Answers "did my email reach X, and if not, why?" by running message search, suppression check, and bounce history lookups in parallel against a recipient address, then synthesizing a plain-English recommendation.
+
+This is a **diagnostic** tool: it composes multiple Postmark API calls into a single coherent answer rather than mirroring a single endpoint.
+
+**Example Prompt:**
+```
+Did my email to recipient@example.com get delivered? If not, what should I do?
+```
+
+**Expected Payload:**
+```json
+{
+  "recipient": "recipient@example.com",
+  "messageId": "0a1b2c3d-...",
+  "fromDate": "2026-04-21",
+  "toDate": "2026-04-28",
+  "messageStream": "outbound"
+}
+```
+
+All fields except `recipient` are optional. If `messageId` is omitted, the most recent message to the recipient is used. The default search window is the last 7 days.
+
+**Sample response:**
+```
+Delivery Diagnosis: recipient@example.com
+────────────────────────────────────────────────
+
+Suppression: not suppressed on stream "outbound"
+
+Most recent message:
+  MessageID: fadeae4e-fb04-4102-9303-9876078c7b81
+  Subject:   Welcome to MyApp
+  Sent:      2026-04-27T18:42:19.0000000-04:00
+  Status:    Sent
+  Events:    Delivered, Opened×2, Clicked
+
+Bounce history: none
+
+Recommended action:
+  Email was delivered. If recipient says they didn't see it, check their
+  spam folder or ask them to whitelist the sender domain.
+```
+
+When the recipient is suppressed, the recommendation differs based on reason: `SpamComplaint` is permanent, `HardBounce` may be reactivatable, `ManualSuppression` can be deleted via `deleteSuppressions`.
 
 ---
 

@@ -70,9 +70,9 @@ async function main() {
     await server.connect(transport);
 
     console.error('Postmark MCP server is running and ready!');
-    console.error('Available tools (21): sendEmail, sendEmailWithTemplate, ' +
+    console.error('Available tools (22): sendEmail, sendEmailWithTemplate, ' +
       'listTemplates, getTemplate, createTemplate, editTemplate, deleteTemplate, validateTemplate, ' +
-      'searchOutboundMessages, getMessageDetails, ' +
+      'searchOutboundMessages, getMessageDetails, diagnoseDelivery, ' +
       'searchBounces, getBounceDump, activateBounce, ' +
       'listSuppressions, createSuppressions, deleteSuppressions, ' +
       'getDeliveryStats, getServerInfo, ' +
@@ -634,6 +634,133 @@ function registerTools(server, postmarkClient) {
             `${events ? `\nEvents:\n${events}` : '\nNo events recorded.'}`
         }]
       };
+    }
+  );
+
+  // ─────────────── Diagnostics ───────────────
+
+  // Composite triage tool: answers "did my email reach X, and if not, why?"
+  // by running searches/lookups in parallel and synthesizing a recommendation.
+  server.tool(
+    "diagnoseDelivery",
+    {
+      recipient: z.string().email().describe("The recipient address to investigate"),
+      messageId: z.string().optional().describe("Optional specific MessageID to investigate. If omitted, the most recent message to recipient is used"),
+      fromDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Search window start, YYYY-MM-DD (default: 7 days ago)"),
+      toDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Search window end, YYYY-MM-DD (default: today)"),
+      messageStream: z.string().optional().describe("Message stream for suppression check (default: DEFAULT_MESSAGE_STREAM)")
+    },
+    async ({ recipient, messageId, fromDate, toDate, messageStream }) => {
+      const stream = messageStream || defaultMessageStream;
+      const today = new Date().toISOString().slice(0, 10);
+      const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString().slice(0, 10);
+      const windowFrom = fromDate || weekAgo;
+      const windowTo = toDate || today;
+
+      console.error('Diagnosing delivery..', { recipient, messageId, stream });
+
+      // Independent lookups in parallel — each tolerant of failure so a
+      // single 404 (e.g., bad messageId) doesn't sink the whole diagnosis.
+      const [messages, suppressions, bounces] = await Promise.all([
+        messageId
+          ? postmarkClient.getOutboundMessageDetails(messageId)
+              .then(r => [r]).catch(() => [])
+          : postmarkClient.getOutboundMessages({
+              recipient,
+              fromdate: windowFrom,
+              todate: windowTo,
+              count: 5,
+            }).then(r => r.Messages || []).catch(() => []),
+        postmarkClient.getSuppressions(stream, { EmailAddress: recipient })
+          .then(r => r.Suppressions || []).catch(() => []),
+        postmarkClient.getBounces({ emailFilter: recipient, count: 10 })
+          .then(r => r.Bounces || []).catch(() => []),
+      ]);
+
+      // Promote the most recent search hit to full details so we have events
+      let latest = null;
+      if (messages.length > 0) {
+        latest = messages[0].MessageEvents
+          ? messages[0]
+          : await postmarkClient.getOutboundMessageDetails(messages[0].MessageID).catch(() => messages[0]);
+      }
+
+      const lines = [`Delivery Diagnosis: ${recipient}`, '─'.repeat(48), ''];
+
+      // 1. Suppression status (most decisive single signal)
+      if (suppressions.length > 0) {
+        const s = suppressions[0];
+        lines.push(`Suppression: SUPPRESSED on stream "${stream}"`);
+        lines.push(`  Reason: ${s.SuppressionReason}`);
+        lines.push(`  Origin: ${s.Origin}`);
+        lines.push(`  Since:  ${s.CreatedAt}`);
+      } else {
+        lines.push(`Suppression: not suppressed on stream "${stream}"`);
+      }
+      lines.push('');
+
+      // 2. Most recent message + its events
+      if (latest) {
+        const events = (latest.MessageEvents || []).map(e => e.Type);
+        const counts = events.reduce((acc, t) => ({ ...acc, [t]: (acc[t] || 0) + 1 }), {});
+        lines.push('Most recent message:');
+        lines.push(`  MessageID: ${latest.MessageID}`);
+        lines.push(`  Subject:   ${latest.Subject || '(none)'}`);
+        lines.push(`  Sent:      ${latest.ReceivedAt}`);
+        lines.push(`  Status:    ${latest.Status}`);
+        if (events.length) {
+          const summary = Object.entries(counts)
+            .map(([t, n]) => n > 1 ? `${t}×${n}` : t).join(', ');
+          lines.push(`  Events:    ${summary}`);
+        }
+      } else {
+        lines.push(`No messages found for ${recipient} between ${windowFrom} and ${windowTo}.`);
+      }
+      lines.push('');
+
+      // 3. Bounce history
+      if (bounces.length > 0) {
+        lines.push(`Bounce history (${bounces.length} recent):`);
+        bounces.slice(0, 3).forEach(b => {
+          const reactivatable = b.CanActivate ? ' [can reactivate]' : '';
+          lines.push(`  - ${b.BouncedAt} ${b.Type}: ${b.Description}${reactivatable}`);
+        });
+        if (bounces.length > 3) lines.push(`  - ... and ${bounces.length - 3} more`);
+      } else {
+        lines.push('Bounce history: none');
+      }
+      lines.push('');
+
+      // 4. Synthesized recommendation
+      lines.push('Recommended action:');
+      if (suppressions.length > 0) {
+        const s = suppressions[0];
+        if (s.SuppressionReason === 'SpamComplaint') {
+          lines.push('  Recipient marked previous mail as spam — suppression is permanent and');
+          lines.push('  cannot be lifted via API. Do not retry.');
+        } else if (s.SuppressionReason === 'HardBounce') {
+          const reactivatable = bounces.find(b => b.CanActivate);
+          if (reactivatable) {
+            lines.push(`  Run activateBounce with bounceId ${reactivatable.ID}, then resend.`);
+          } else {
+            lines.push('  Address hard-bounced. Verify the address is valid before retrying;');
+            lines.push('  if confirmed valid, run deleteSuppressions then resend.');
+          }
+        } else {
+          lines.push('  Run deleteSuppressions with this address to lift the suppression, then resend.');
+        }
+      } else if (latest && (latest.MessageEvents || []).some(e => e.Type === 'Delivered')) {
+        lines.push('  Email was delivered. If recipient says they didn\'t see it, check their');
+        lines.push('  spam folder or ask them to whitelist the sender domain.');
+      } else if (latest?.Status === 'Queued') {
+        lines.push('  Most recent message is still queued. Re-run in a few minutes.');
+      } else if (!latest) {
+        lines.push(`  No recent send to this address. Use sendEmail to send, or expand the date range.`);
+      } else {
+        lines.push(`  Message status is "${latest.Status}". Review events above to identify the failure.`);
+      }
+
+      return { content: [{ type: "text", text: lines.join('\n') }] };
     }
   );
 

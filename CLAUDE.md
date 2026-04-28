@@ -27,14 +27,17 @@ Communication uses stdio transport (stdin/stdout), not HTTP. All `console.error`
 
 ## MCP Tools Registered
 
-The server exposes 21 tools across these categories:
+The server exposes 22 tools across these categories:
 - **Email:** sendEmail, sendEmailWithTemplate
 - **Templates:** listTemplates, getTemplate, createTemplate, editTemplate, deleteTemplate, validateTemplate
 - **Messages:** searchOutboundMessages, getMessageDetails
+- **Diagnostics:** diagnoseDelivery
 - **Bounces:** searchBounces, getBounceDump, activateBounce
 - **Suppressions:** listSuppressions, createSuppressions, deleteSuppressions
 - **Stats & Server:** getDeliveryStats, getServerInfo
 - **Webhooks:** listWebhooks, createWebhook, deleteWebhook
+
+`diagnoseDelivery` is a **composite tool** — it does not mirror a single Postmark endpoint. Instead it runs `getOutboundMessages` (or `getOutboundMessageDetails`), `getSuppressions`, and `getBounces` in parallel for the given recipient, then synthesizes a plain-English recommendation. When adding new diagnostic tools, follow the same pattern: parallelize independent lookups via `Promise.all`, swallow individual failures with `.catch(() => fallback)` so one 404 doesn't sink the whole diagnosis, and end with a `Recommended action` block that interprets the data.
 
 `getDeliveryStats` is unified: with no arguments it returns a friendly headline summary; with `stat: "<name>"` it returns a polished per-stat breakdown. Supported `stat` values: `summary`, `overview`, `sent`, `bounces`, `spam`, `tracked`, `opens`, `openPlatforms`, `openClients`, `openReadTimes`, `clicks`, `clickBrowsers`, `clickPlatforms`, `clickLocation`. Each value maps to a specific `postmarkClient.get*` method in the `fetchers` object inside the tool — when adding a new stat, add both the enum value and the fetcher entry.
 

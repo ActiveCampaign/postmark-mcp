@@ -25,7 +25,7 @@ const record = (name, ok, detail) => {
 // 1. tools/list
 const toolList = await client.listTools();
 const toolNames = toolList.tools.map(t => t.name).sort();
-const expected = 21;
+const expected = 22;
 record(`tools/list (${expected} expected)`, toolNames.length === expected, `${toolNames.length} tools: ${toolNames.join(", ")}`);
 
 async function call(name, args = {}) {
@@ -60,6 +60,8 @@ for (const [label, name, args] of [
   ["getDeliveryStats stat=clickPlatforms",                   "getDeliveryStats", { stat: "clickPlatforms" }],
   ["getDeliveryStats stat=clickLocation",                    "getDeliveryStats", { stat: "clickLocation" }],
   ["searchOutboundMessages (count=1, messageStream filter)", "searchOutboundMessages", { count: 1, messageStream: process.env.DEFAULT_MESSAGE_STREAM }],
+  ["diagnoseDelivery (known recipient)",                     "diagnoseDelivery", { recipient: "recipient@example.com" }],
+  ["diagnoseDelivery (recipient with no recent sends)",      "diagnoseDelivery", { recipient: "no-recent-mail@example.com" }],
   ["searchBounces (count=1)",                                "searchBounces", { count: 1 }],
   ["listSuppressions",                                       "listSuppressions", {}],
   ["listWebhooks",                                           "listWebhooks", {}],
