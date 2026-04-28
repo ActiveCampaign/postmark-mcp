@@ -493,9 +493,17 @@ function registerTools(server, postmarkClient) {
       const result = await postmarkClient.getTemplates();
       console.error(`Found ${result.Templates.length} templates`);
 
-      const templateList = result.Templates.map(t =>
-        `• **${t.Name}**\n  - ID: ${t.TemplateId}\n  - Alias: ${t.Alias || 'none'}\n  - Subject: ${t.Subject || 'none'}`
-      ).join('\n\n');
+      const templateList = result.Templates.map(t => {
+        const lines = [
+          `• **${t.Name}**`,
+          `  - ID: ${t.TemplateId}`,
+          `  - Alias: ${t.Alias || 'none'}`,
+          `  - Subject: ${t.Subject || 'none'}`,
+        ];
+        if (t.TemplateType) lines.push(`  - Type: ${t.TemplateType}`);
+        if (t.LayoutTemplate) lines.push(`  - Layout: ${t.LayoutTemplate}`);
+        return lines.join('\n');
+      }).join('\n\n');
 
       return {
         content: [{
@@ -524,6 +532,7 @@ function registerTools(server, postmarkClient) {
             `Alias: ${result.Alias || 'none'}\n` +
             `Subject: ${result.Subject}\n` +
             `Type: ${result.TemplateType}\n` +
+            `Layout: ${result.LayoutTemplate || 'none'}\n` +
             `Active: ${result.Active}\n` +
             `Associated Server: ${result.AssociatedServerId}\n\n` +
             `--- HTML Body ---\n${result.HtmlBody || '(empty)'}\n\n` +
@@ -537,22 +546,35 @@ function registerTools(server, postmarkClient) {
     "createTemplate",
     {
       name: z.string().describe("Template name"),
-      subject: z.string().describe("Template subject line"),
+      subject: z.string().optional().describe("Template subject line. Required for Standard templates; must be omitted for Layout templates (Postmark rejects Subject on Layouts)."),
       htmlBody: z.string().optional().describe("HTML content of the template"),
       textBody: z.string().optional().describe("Plain text content of the template"),
       alias: z.string().optional().describe("A unique alias for the template (letters, numbers, dots, hyphens, underscores)"),
-      templateType: z.enum(["Standard", "Layout"]).optional().describe("Template type (default: Standard)")
+      templateType: z.enum(["Standard", "Layout"]).optional().describe("Template type (default: Standard)"),
+      layoutTemplate: z.string().optional().describe("Alias of an existing Layout template to wrap this template's content. Only valid when templateType is 'Standard' (the default).")
     },
-    async ({ name, subject, htmlBody, textBody, alias, templateType }) => {
+    async ({ name, subject, htmlBody, textBody, alias, templateType, layoutTemplate }) => {
       if (!htmlBody && !textBody) {
         throw new Error("At least one of htmlBody or textBody must be provided");
       }
+      const isLayout = templateType === "Layout";
+      if (!isLayout && !subject) {
+        throw new Error("Subject is required for Standard templates");
+      }
+      if (isLayout && subject) {
+        throw new Error("Subject must not be provided for Layout templates — Postmark rejects this field on Layouts");
+      }
+      if (layoutTemplate && isLayout) {
+        throw new Error("layoutTemplate cannot be set on a Layout template — only Standard templates wrap a layout");
+      }
 
-      const options = { Name: name, Subject: subject };
+      const options = { Name: name };
+      if (subject) options.Subject = subject;
       if (htmlBody) options.HtmlBody = htmlBody;
       if (textBody) options.TextBody = textBody;
       if (alias) options.Alias = alias;
       if (templateType) options.TemplateType = templateType;
+      if (layoutTemplate) options.LayoutTemplate = layoutTemplate;
 
       console.error('Creating template..', { name });
       const result = await postmarkClient.createTemplate(options);
@@ -565,6 +587,7 @@ function registerTools(server, postmarkClient) {
             `ID: ${result.TemplateId}\n` +
             `Name: ${result.Name}\n` +
             `Alias: ${result.Alias || 'none'}\n` +
+            `Layout: ${result.LayoutTemplate || 'none'}\n` +
             `Active: ${result.Active}`
         }]
       };
@@ -579,18 +602,24 @@ function registerTools(server, postmarkClient) {
       subject: z.string().optional().describe("Updated subject line"),
       htmlBody: z.string().optional().describe("Updated HTML content"),
       textBody: z.string().optional().describe("Updated plain text content"),
-      alias: z.string().optional().describe("Updated alias")
+      alias: z.string().optional().describe("Updated alias"),
+      layoutTemplate: z.string().nullable().optional().describe("Alias of a Layout template to bind this Standard template to. Pass null to unbind (remove the layout association).")
     },
-    async ({ templateIdOrAlias, name, subject, htmlBody, textBody, alias }) => {
+    async ({ templateIdOrAlias, name, subject, htmlBody, textBody, alias, layoutTemplate }) => {
       const options = {};
       if (name) options.Name = name;
       if (subject) options.Subject = subject;
       if (htmlBody) options.HtmlBody = htmlBody;
       if (textBody) options.TextBody = textBody;
       if (alias) options.Alias = alias;
+      // Postmark's edit endpoint treats JSON null as "no change". Sending an
+      // empty string is the documented way to unbind a layout association.
+      if (layoutTemplate !== undefined) {
+        options.LayoutTemplate = layoutTemplate === null ? "" : layoutTemplate;
+      }
 
       if (Object.keys(options).length === 0) {
-        throw new Error("Provide at least one field to update (name, subject, htmlBody, textBody, or alias)");
+        throw new Error("Provide at least one field to update (name, subject, htmlBody, textBody, alias, or layoutTemplate)");
       }
 
       console.error('Editing template..', { templateIdOrAlias });
@@ -604,6 +633,7 @@ function registerTools(server, postmarkClient) {
             `ID: ${result.TemplateId}\n` +
             `Name: ${result.Name}\n` +
             `Alias: ${result.Alias || 'none'}\n` +
+            `Layout: ${result.LayoutTemplate || 'none'}\n` +
             `Active: ${result.Active}`
         }]
       };

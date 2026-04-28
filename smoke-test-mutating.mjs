@@ -10,6 +10,7 @@ const SENDER = "recipient@example.com";       // DEFAULT_SENDER_EMAIL
 const RECIPIENT = "recipient@example.com";   // another verified address
 const ts = Date.now();
 const TEMPLATE_ALIAS = `mcp-smoke-${ts}`;
+const LAYOUT_ALIAS = `mcp-smoke-layout-${ts}`;
 const WEBHOOK_URL = `https://example.com/mcp-smoke-${ts}`;
 const SUPPRESS_EMAIL = `mcp-smoke-${ts}@example.com`; // fake local-part on user's domain
 
@@ -36,19 +37,37 @@ async function call(name, args = {}) {
 }
 
 let createdTemplateId = null;
+let createdLayoutId = null;
 let createdWebhookId = null;
 let suppressionCreated = false;
 
 try {
-  // ─────────── Template lifecycle ───────────
+  // ─────────── Layout template (used for layout-binding lifecycle below) ───────────
   let r = await call("createTemplate", {
+    name: `MCP Smoke Layout ${ts}`,
+    htmlBody: "<html><body><div>{{{ @content }}}</div><footer>smoke layout</footer></body></html>",
+    textBody: "{{{ @content }}}\n\n— smoke layout",
+    alias: LAYOUT_ALIAS,
+    templateType: "Layout",
+  });
+  log("createTemplate (Layout)", r.ok, r.text);
+  if (r.ok) {
+    const m = r.text.match(/ID:\s*(\d+)/);
+    if (m) createdLayoutId = parseInt(m[1], 10);
+  }
+
+  // ─────────── Standard template lifecycle ───────────
+  r = await call("createTemplate", {
     name: `MCP Smoke ${ts}`,
     subject: "Hello {{name}}",
     htmlBody: "<h1>Hi {{name}}</h1><p>Sent at " + ts + "</p>",
     textBody: "Hi {{name}} — sent at " + ts,
     alias: TEMPLATE_ALIAS,
+    layoutTemplate: LAYOUT_ALIAS,
   });
-  log("createTemplate", r.ok, r.text);
+  log("createTemplate (with layoutTemplate binding)",
+    r.ok && r.text.includes(`Layout: ${LAYOUT_ALIAS}`),
+    r.text);
   if (r.ok) {
     const m = r.text.match(/ID:\s*(\d+)/);
     if (m) createdTemplateId = parseInt(m[1], 10);
@@ -56,6 +75,9 @@ try {
 
   r = await call("getTemplate", { templateIdOrAlias: TEMPLATE_ALIAS });
   log("getTemplate (by alias)", r.ok && r.text.includes(`MCP Smoke ${ts}`), r.text);
+  log("getTemplate (surfaces Layout binding)",
+    r.ok && r.text.includes(`Layout: ${LAYOUT_ALIAS}`),
+    r.text);
 
   r = await call("validateTemplate", {
     subject: "Hello {{name}}",
@@ -75,6 +97,33 @@ try {
     subject: "Updated subject {{name}}",
   });
   log("editTemplate", r.ok, r.text);
+
+  // ─────────── Layout binding round-trip ───────────
+  r = await call("editTemplate", {
+    templateIdOrAlias: TEMPLATE_ALIAS,
+    layoutTemplate: null,
+  });
+  log("editTemplate (unbind layout via null)",
+    r.ok && r.text.includes(`Layout: none`),
+    r.text);
+
+  r = await call("getTemplate", { templateIdOrAlias: TEMPLATE_ALIAS });
+  log("getTemplate (confirms layout unbound)",
+    r.ok && r.text.includes(`Layout: none`),
+    r.text);
+
+  r = await call("editTemplate", {
+    templateIdOrAlias: TEMPLATE_ALIAS,
+    layoutTemplate: LAYOUT_ALIAS,
+  });
+  log("editTemplate (rebind layout)",
+    r.ok && r.text.includes(`Layout: ${LAYOUT_ALIAS}`),
+    r.text);
+
+  r = await call("listTemplates", {});
+  log("listTemplates (rows include Layout binding)",
+    r.ok && r.text.includes(`Layout: ${LAYOUT_ALIAS}`),
+    r.text);
 
   // ─────────── Email sends ───────────
   r = await call("sendEmail", {
@@ -163,6 +212,13 @@ try {
   if (createdTemplateId !== null || true) {
     const r = await call("deleteTemplate", { templateIdOrAlias: TEMPLATE_ALIAS });
     log("deleteTemplate", r.ok, r.text);
+  }
+
+  if (createdLayoutId !== null) {
+    const r = await call("deleteTemplate", { templateIdOrAlias: LAYOUT_ALIAS });
+    log("deleteTemplate (Layout)", r.ok, r.text);
+  } else {
+    log("deleteTemplate (Layout — skipped, never created)", true, "");
   }
 
   if (createdWebhookId !== null) {

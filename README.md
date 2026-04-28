@@ -300,7 +300,11 @@ Retrieves a single template's full content (HTML body, text body, subject, type)
 **Payload:** `{ "templateIdOrAlias": "welcome" }` — accepts numeric ID or string alias.
 
 ### createTemplate
-Creates a new template. Requires `name` and `subject`. At least one of `htmlBody` or `textBody` must be provided.
+Creates a new template. Requires `name`. At least one of `htmlBody` or `textBody` must be provided.
+
+`subject` is required for Standard templates and must be **omitted** for Layout templates — Postmark rejects the field on Layouts.
+
+`layoutTemplate` (Standard only) binds the new template to an existing Layout by alias. Without it, the new template renders unwrapped (no chrome from any layout).
 
 **Expected Payload:**
 ```json
@@ -310,14 +314,17 @@ Creates a new template. Requires `name` and `subject`. At least one of `htmlBody
   "htmlBody": "<h1>Thanks {{name}}</h1>",
   "textBody": "Thanks {{name}}",
   "alias": "order-confirmation",
-  "templateType": "Standard"
+  "templateType": "Standard",
+  "layoutTemplate": "basic"
 }
 ```
 
 `templateType` may be `"Standard"` (default) or `"Layout"`.
 
 ### editTemplate
-Updates an existing template. Requires `templateIdOrAlias` plus **at least one** updated field (`name`, `subject`, `htmlBody`, `textBody`, or `alias`).
+Updates an existing template. Requires `templateIdOrAlias` plus **at least one** updated field (`name`, `subject`, `htmlBody`, `textBody`, `alias`, or `layoutTemplate`).
+
+Pass `"layoutTemplate": null` to unbind a template from its current Layout (the MCP translates this to the empty-string the Postmark API requires for clearing the association).
 
 ### deleteTemplate
 Deletes a template by ID or alias.
