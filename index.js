@@ -7,7 +7,6 @@
  */
 
 import 'dotenv/config';
-import fetch from 'node-fetch';
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -40,7 +39,7 @@ async function initializeServices() {
     console.error('Message stream: ', defaultMessageStream);
 
     const client = new postmark.ServerClient(serverToken);
-    
+
     // Verify Postmark client by making a test API call
     await client.getServer();
 
@@ -71,7 +70,13 @@ async function main() {
     await server.connect(transport);
 
     console.error('Postmark MCP server is running and ready!');
-    console.error(`Available tools: sendEmail, sendEmailWithTemplate, listTemplates, getDeliveryStats`);
+    console.error('Available tools (21): sendEmail, sendEmailWithTemplate, ' +
+      'listTemplates, getTemplate, createTemplate, editTemplate, deleteTemplate, validateTemplate, ' +
+      'searchOutboundMessages, getMessageDetails, ' +
+      'searchBounces, getBounceDump, activateBounce, ' +
+      'listSuppressions, createSuppressions, deleteSuppressions, ' +
+      'getDeliveryStats, getServerInfo, ' +
+      'listWebhooks, createWebhook, deleteWebhook');
 
     process.on('SIGTERM', () => handleShutdown(server));
     process.on('SIGINT', () => handleShutdown(server));
@@ -106,9 +111,169 @@ process.on('unhandledRejection', (reason) => {
   process.exit(1);
 });
 
-// Move tool registration to a separate function for better organization
+// ───── Formatting helpers ─────
+
+const fmtInt = n => (n ?? 0).toLocaleString('en-US');
+
+const fmtPct = (numerator, denominator) => {
+  if (!denominator) return '0.0%';
+  return `${((numerator / denominator) * 100).toFixed(1)}%`;
+};
+
+// Render { Desktop, Mobile, WebMail, Unknown } breakdown with percentages
+const fmtPlatformUsage = (data) => {
+  const buckets = ['Desktop', 'Mobile', 'WebMail', 'Unknown'];
+  const total = buckets.reduce((sum, k) => sum + (data[k] || 0), 0);
+  if (total === 0) return '  (no data in range)';
+  return buckets
+    .map(k => `  ${k.padEnd(8)} ${fmtInt(data[k] || 0).padStart(8)}  (${fmtPct(data[k] || 0, total)})`)
+    .join('\n');
+};
+
+// Render top-N { name: count } breakdown sorted descending. Skips `Days`.
+const fmtTopBreakdown = (data, limit = 10) => {
+  const entries = Object.entries(data)
+    .filter(([k, v]) => k !== 'Days' && typeof v === 'number')
+    .sort((a, b) => b[1] - a[1]);
+  if (entries.length === 0) return '  (no data in range)';
+  const total = entries.reduce((sum, [, v]) => sum + v, 0);
+  const shown = entries.slice(0, limit);
+  const lines = shown.map(([k, v]) =>
+    `  ${k.padEnd(20)} ${fmtInt(v).padStart(8)}  (${fmtPct(v, total)})`
+  );
+  if (entries.length > limit) {
+    lines.push(`  ${`… and ${entries.length - limit} more`}`);
+  }
+  return lines.join('\n');
+};
+
+// Render delivery summary (default behavior of getDeliveryStats — v1 compatible)
+const fmtDeliverySummary = (d, { fromDate, toDate, tag, messageStream } = {}) => {
+  const sent = d.Sent || 0;
+  const tracked = d.Tracked || 0;
+  const bounced = d.Bounced || 0;
+  const spam = d.SpamComplaints || 0;
+  const uniqueOpens = d.UniqueOpens || 0;
+  const totalLinks = d.TotalTrackedLinksSent || 0;
+  const uniqueClicks = d.UniqueLinksClicked || 0;
+
+  const lines = [
+    'Email Delivery Summary',
+    '',
+    `Sent:        ${fmtInt(sent)}`,
+    `Tracked:     ${fmtInt(tracked)}  (${fmtPct(tracked, sent)} of sent)`,
+    `Open rate:   ${fmtPct(uniqueOpens, tracked)}  (${fmtInt(uniqueOpens)}/${fmtInt(tracked)} unique opens)`,
+    `Click rate:  ${fmtPct(uniqueClicks, totalLinks)}  (${fmtInt(uniqueClicks)}/${fmtInt(totalLinks)} unique links clicked)`,
+    `Bounced:     ${fmtInt(bounced)}  (${fmtPct(bounced, sent)})`,
+    `Spam:        ${fmtInt(spam)}  (${fmtPct(spam, sent)})`,
+  ];
+
+  const filters = [];
+  if (fromDate || toDate) filters.push(`Period: ${fromDate || 'start'} → ${toDate || 'now'}`);
+  if (tag) filters.push(`Tag: ${tag}`);
+  if (messageStream) filters.push(`Stream: ${messageStream}`);
+  if (filters.length) {
+    lines.push('');
+    lines.push(...filters);
+  }
+
+  return lines.join('\n');
+};
+
+// Format any of the per-stat responses returned by getDeliveryStats
+const fmtStatResponse = (stat, d) => {
+  switch (stat) {
+    case 'overview':
+      return [
+        'Outbound Overview',
+        '',
+        `Sent:                ${fmtInt(d.Sent)}`,
+        `Bounced:             ${fmtInt(d.Bounced)}  (${(d.BounceRate ?? 0).toFixed(2)}%)`,
+        `SMTP API errors:     ${fmtInt(d.SMTPApiErrors)}`,
+        `Spam complaints:     ${fmtInt(d.SpamComplaints)}  (${(d.SpamComplaintsRate ?? 0).toFixed(2)}%)`,
+        `Tracked:             ${fmtInt(d.Tracked)}`,
+        `Opens (total):       ${fmtInt(d.Opens)}`,
+        `Opens (unique):      ${fmtInt(d.UniqueOpens)}`,
+        `Tracked links sent:  ${fmtInt(d.TotalTrackedLinksSent)}`,
+        `Total clicks:        ${fmtInt(d.TotalClicks)}`,
+        `Unique link clicks:  ${fmtInt(d.UniqueLinksClicked)}`,
+        `With open tracking:  ${fmtInt(d.WithOpenTracking)}`,
+        `With link tracking:  ${fmtInt(d.WithLinkTracking)}`,
+      ].join('\n');
+
+    case 'sent':
+      return `Sent\n\n  Total: ${fmtInt(d.Sent)}`;
+
+    case 'bounces': {
+      const typeEntries = Object.entries(d)
+        .filter(([k, v]) => k !== 'Days' && k !== 'Total' && typeof v === 'number' && v > 0)
+        .sort((a, b) => b[1] - a[1]);
+      const total = typeEntries.reduce((sum, [, v]) => sum + v, 0);
+      if (total === 0) return 'Bounces\n\n  (no bounces in range)';
+      const types = typeEntries
+        .map(([k, v]) => `  ${k.padEnd(24)} ${fmtInt(v).padStart(8)}  (${fmtPct(v, total)})`)
+        .join('\n');
+      return `Bounces\n\n  Total: ${fmtInt(total)}\n\n${types}`;
+    }
+
+    case 'spam':
+      return `Spam Complaints\n\n  Total: ${fmtInt(d.SpamComplaint)}`;
+
+    case 'tracked':
+      return `Tracked Emails\n\n  Total: ${fmtInt(d.Tracked)}`;
+
+    case 'opens':
+      return [
+        'Email Opens',
+        '',
+        `  Total opens:    ${fmtInt(d.Opens)}`,
+        `  Unique opens:   ${fmtInt(d.Unique)}`,
+      ].join('\n');
+
+    case 'openPlatforms':
+      return `Open Platform Usage\n\n${fmtPlatformUsage(d)}`;
+
+    case 'openClients':
+      return `Email Client Usage (top 10)\n\n${fmtTopBreakdown(d)}`;
+
+    case 'openReadTimes':
+      return `Open Read Times\n\n${fmtTopBreakdown(d)}`;
+
+    case 'clicks':
+      return [
+        'Link Clicks',
+        '',
+        `  Total clicks:   ${fmtInt(d.Clicks)}`,
+        `  Unique clicks:  ${fmtInt(d.Unique)}`,
+      ].join('\n');
+
+    case 'clickBrowsers':
+      return `Click Browser Usage (top 10)\n\n${fmtTopBreakdown(d)}`;
+
+    case 'clickPlatforms':
+      return `Click Platform Usage\n\n${fmtPlatformUsage(d)}`;
+
+    case 'clickLocation': {
+      const html = d.HTML || 0;
+      const text = d.Text || 0;
+      const total = html + text;
+      return [
+        'Click Location',
+        '',
+        `  HTML:  ${fmtInt(html).padStart(8)}  (${fmtPct(html, total)})`,
+        `  Text:  ${fmtInt(text).padStart(8)}  (${fmtPct(text, total)})`,
+      ].join('\n');
+    }
+
+    default:
+      return JSON.stringify(d, null, 2);
+  }
+};
+
+// Tool registration
 function registerTools(server, postmarkClient) {
-  // Define and register the sendEmail tool
+  // ─────────────── Email ───────────────
+
   server.tool(
     "sendEmail",
     {
@@ -146,7 +311,6 @@ function registerTools(server, postmarkClient) {
     }
   );
 
-  // Define and register the sendEmailWithTemplate tool
   server.tool(
     "sendEmailWithTemplate",
     {
@@ -182,17 +346,18 @@ function registerTools(server, postmarkClient) {
       console.error('Sending template email..', { to, templateId: templateId || templateAlias });
       const result = await postmarkClient.sendEmailWithTemplate(emailData);
       console.error('Template email sent successfully: ', result.MessageID);
-      
+
       return {
         content: [{
-          type: "text", 
+          type: "text",
           text: `Template email sent successfully!\nMessageID: ${result.MessageID}\nTo: ${to}\nTemplate: ${templateId || templateAlias}`
         }]
       };
     }
   );
 
-  // Define and register the listTemplates tool
+  // ─────────────── Templates ───────────────
+
   server.tool(
     "listTemplates",
     {},
@@ -201,7 +366,7 @@ function registerTools(server, postmarkClient) {
       const result = await postmarkClient.getTemplates();
       console.error(`Found ${result.Templates.length} templates`);
 
-      const templateList = result.Templates.map(t => 
+      const templateList = result.Templates.map(t =>
         `• **${t.Name}**\n  - ID: ${t.TemplateId}\n  - Alias: ${t.Alias || 'none'}\n  - Subject: ${t.Subject || 'none'}`
       ).join('\n\n');
 
@@ -214,55 +379,657 @@ function registerTools(server, postmarkClient) {
     }
   );
 
-  // Define and register the getDeliveryStats tool
   server.tool(
-    "getDeliveryStats",
+    "getTemplate",
     {
-      tag: z.string().optional().describe("Filter by tag (optional)"),
-      fromDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Start date in YYYY-MM-DD format (optional)"),
-      toDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("End date in YYYY-MM-DD format (optional)")
+      templateIdOrAlias: z.union([z.number(), z.string()]).describe("Template ID (number) or alias (string)")
     },
-    async ({ tag, fromDate, toDate }) => {
-      const query = [];
-      if (fromDate) query.push(`fromdate=${encodeURIComponent(fromDate)}`);
-      if (toDate) query.push(`todate=${encodeURIComponent(toDate)}`);
-      if (tag) query.push(`tag=${encodeURIComponent(tag)}`);
-
-      const url = `https://api.postmarkapp.com/stats/outbound${query.length ? '?' + query.join('&') : ''}`;
-
-      console.error('Fetching delivery stats..');
-
-      const response = await fetch(url, {
-        headers: {
-          "Accept": "application/json",
-          "X-Postmark-Server-Token": serverToken
-        }
-      });
-
-      if (!response.ok) {
-        throw new Error(`API request failed: ${response.status} ${response.statusText}`);
-      }
-
-      const data = await response.json();
-      console.error('Stats retrieved successfully');
-
-      const sent = data.Sent || 0;
-      const tracked = data.Tracked || 0;
-      const uniqueOpens = data.UniqueOpens || 0;
-      const totalTrackedLinks = data.TotalTrackedLinksSent || 0;
-      const uniqueLinksClicked = data.UniqueLinksClicked || 0;
-      const openRate = tracked > 0 ? ((uniqueOpens / tracked) * 100).toFixed(1) : '0.0';
-      const clickRate = totalTrackedLinks > 0 ? ((uniqueLinksClicked / totalTrackedLinks) * 100).toFixed(1) : '0.0';
+    async ({ templateIdOrAlias }) => {
+      console.error('Fetching template..', { templateIdOrAlias });
+      const result = await postmarkClient.getTemplate(templateIdOrAlias);
+      console.error('Template retrieved');
 
       return {
         content: [{
           type: "text",
-          text: `Email Statistics Summary\n\n` +
-                `Sent: ${sent} emails\n` +
-                `Open Rate: ${openRate}% (${uniqueOpens}/${tracked} tracked emails)\n` +
-                `Click Rate: ${clickRate}% (${uniqueLinksClicked}/${totalTrackedLinks} tracked links)\n\n` +
-                `${fromDate || toDate ? `Period: ${fromDate || 'start'} to ${toDate || 'now'}\n` : ''}` +
-                `${tag ? `Tag: ${tag}\n` : ''}`
+          text: `Template: ${result.Name}\n\n` +
+            `ID: ${result.TemplateId}\n` +
+            `Alias: ${result.Alias || 'none'}\n` +
+            `Subject: ${result.Subject}\n` +
+            `Type: ${result.TemplateType}\n` +
+            `Active: ${result.Active}\n` +
+            `Associated Server: ${result.AssociatedServerId}\n\n` +
+            `--- HTML Body ---\n${result.HtmlBody || '(empty)'}\n\n` +
+            `--- Text Body ---\n${result.TextBody || '(empty)'}`
+        }]
+      };
+    }
+  );
+
+  server.tool(
+    "createTemplate",
+    {
+      name: z.string().describe("Template name"),
+      subject: z.string().describe("Template subject line"),
+      htmlBody: z.string().optional().describe("HTML content of the template"),
+      textBody: z.string().optional().describe("Plain text content of the template"),
+      alias: z.string().optional().describe("A unique alias for the template (letters, numbers, dots, hyphens, underscores)"),
+      templateType: z.enum(["Standard", "Layout"]).optional().describe("Template type (default: Standard)")
+    },
+    async ({ name, subject, htmlBody, textBody, alias, templateType }) => {
+      if (!htmlBody && !textBody) {
+        throw new Error("At least one of htmlBody or textBody must be provided");
+      }
+
+      const options = { Name: name, Subject: subject };
+      if (htmlBody) options.HtmlBody = htmlBody;
+      if (textBody) options.TextBody = textBody;
+      if (alias) options.Alias = alias;
+      if (templateType) options.TemplateType = templateType;
+
+      console.error('Creating template..', { name });
+      const result = await postmarkClient.createTemplate(options);
+      console.error('Template created: ', result.TemplateId);
+
+      return {
+        content: [{
+          type: "text",
+          text: `Template created successfully!\n\n` +
+            `ID: ${result.TemplateId}\n` +
+            `Name: ${result.Name}\n` +
+            `Alias: ${result.Alias || 'none'}\n` +
+            `Active: ${result.Active}`
+        }]
+      };
+    }
+  );
+
+  server.tool(
+    "editTemplate",
+    {
+      templateIdOrAlias: z.union([z.number(), z.string()]).describe("Template ID (number) or alias (string)"),
+      name: z.string().optional().describe("Updated template name"),
+      subject: z.string().optional().describe("Updated subject line"),
+      htmlBody: z.string().optional().describe("Updated HTML content"),
+      textBody: z.string().optional().describe("Updated plain text content"),
+      alias: z.string().optional().describe("Updated alias")
+    },
+    async ({ templateIdOrAlias, name, subject, htmlBody, textBody, alias }) => {
+      const options = {};
+      if (name) options.Name = name;
+      if (subject) options.Subject = subject;
+      if (htmlBody) options.HtmlBody = htmlBody;
+      if (textBody) options.TextBody = textBody;
+      if (alias) options.Alias = alias;
+
+      if (Object.keys(options).length === 0) {
+        throw new Error("Provide at least one field to update (name, subject, htmlBody, textBody, or alias)");
+      }
+
+      console.error('Editing template..', { templateIdOrAlias });
+      const result = await postmarkClient.editTemplate(templateIdOrAlias, options);
+      console.error('Template updated: ', result.TemplateId);
+
+      return {
+        content: [{
+          type: "text",
+          text: `Template updated successfully!\n\n` +
+            `ID: ${result.TemplateId}\n` +
+            `Name: ${result.Name}\n` +
+            `Alias: ${result.Alias || 'none'}\n` +
+            `Active: ${result.Active}`
+        }]
+      };
+    }
+  );
+
+  server.tool(
+    "deleteTemplate",
+    {
+      templateIdOrAlias: z.union([z.number(), z.string()]).describe("Template ID (number) or alias (string) to delete")
+    },
+    async ({ templateIdOrAlias }) => {
+      console.error('Deleting template..', { templateIdOrAlias });
+      await postmarkClient.deleteTemplate(templateIdOrAlias);
+      console.error('Template deleted');
+
+      return {
+        content: [{
+          type: "text",
+          text: `Template "${templateIdOrAlias}" deleted successfully.`
+        }]
+      };
+    }
+  );
+
+  server.tool(
+    "validateTemplate",
+    {
+      subject: z.string().optional().describe("Template subject to validate"),
+      htmlBody: z.string().optional().describe("HTML body to validate"),
+      textBody: z.string().optional().describe("Text body to validate"),
+      testRenderModel: z.object({}).passthrough().optional().describe("Test data model to render the template with"),
+      templateType: z.enum(["Standard", "Layout"]).optional().describe("Template type (default: Standard)"),
+      layoutTemplate: z.string().optional().describe("Layout template alias to validate against")
+    },
+    async ({ subject, htmlBody, textBody, testRenderModel, templateType, layoutTemplate }) => {
+      if (!subject && !htmlBody && !textBody) {
+        throw new Error("At least one of subject, htmlBody, or textBody must be provided");
+      }
+
+      const options = {};
+      if (subject) options.Subject = subject;
+      if (htmlBody) options.HtmlBody = htmlBody;
+      if (textBody) options.TextBody = textBody;
+      if (testRenderModel) options.TestRenderModel = testRenderModel;
+      if (templateType) options.TemplateType = templateType;
+      if (layoutTemplate) options.LayoutTemplate = layoutTemplate;
+
+      console.error('Validating template..');
+      const result = await postmarkClient.validateTemplate(options);
+      console.error('Template validation complete');
+
+      const sections = [];
+
+      if (result.Subject) {
+        sections.push(`Subject: ${result.Subject.ContentIsValid ? 'Valid' : 'INVALID'}` +
+          (result.Subject.ValidationErrors?.length ? `\n  Errors: ${result.Subject.ValidationErrors.map(e => e.Message).join(', ')}` : '') +
+          (result.Subject.RenderedContent ? `\n  Rendered: ${result.Subject.RenderedContent}` : ''));
+      }
+      if (result.HtmlBody) {
+        sections.push(`HTML Body: ${result.HtmlBody.ContentIsValid ? 'Valid' : 'INVALID'}` +
+          (result.HtmlBody.ValidationErrors?.length ? `\n  Errors: ${result.HtmlBody.ValidationErrors.map(e => e.Message).join(', ')}` : ''));
+      }
+      if (result.TextBody) {
+        sections.push(`Text Body: ${result.TextBody.ContentIsValid ? 'Valid' : 'INVALID'}` +
+          (result.TextBody.ValidationErrors?.length ? `\n  Errors: ${result.TextBody.ValidationErrors.map(e => e.Message).join(', ')}` : ''));
+      }
+
+      const allValid = result.AllContentIsValid;
+
+      return {
+        content: [{
+          type: "text",
+          text: `Template Validation: ${allValid ? 'ALL VALID' : 'HAS ERRORS'}\n\n${sections.join('\n\n')}`
+        }]
+      };
+    }
+  );
+
+  // ─────────────── Messages ───────────────
+
+  server.tool(
+    "searchOutboundMessages",
+    {
+      recipient: z.string().optional().describe("Filter by recipient email address"),
+      fromEmail: z.string().optional().describe("Filter by sender email address"),
+      tag: z.string().optional().describe("Filter by tag"),
+      subject: z.string().optional().describe("Filter by subject line"),
+      status: z.enum(["queued", "sent", "processed"]).optional().describe("Filter by message status"),
+      messageStream: z.string().optional().describe("Filter by message stream ID (e.g. 'outbound')"),
+      fromDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Start date in YYYY-MM-DD format"),
+      toDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("End date in YYYY-MM-DD format"),
+      count: z.number().int().min(1).max(500).optional().describe("Number of results to return (default 50, max 500)"),
+      offset: z.number().int().min(0).optional().describe("Pagination offset (default 0)")
+    },
+    async ({ recipient, fromEmail, tag, subject, status, messageStream, fromDate, toDate, count, offset }) => {
+      const filter = {};
+      if (recipient) filter.recipient = recipient;
+      if (fromEmail) filter.fromemail = fromEmail;
+      if (tag) filter.tag = tag;
+      if (subject) filter.subject = subject;
+      if (status) filter.status = status;
+      if (messageStream) filter.messagestream = messageStream;
+      if (fromDate) filter.fromdate = fromDate;
+      if (toDate) filter.todate = toDate;
+      filter.count = count || 50;
+      filter.offset = offset || 0;
+
+      console.error('Searching outbound messages..', filter);
+      const result = await postmarkClient.getOutboundMessages(filter);
+      console.error(`Found ${result.TotalCount} messages`);
+
+      if (result.Messages.length === 0) {
+        return { content: [{ type: "text", text: "No messages found matching your criteria." }] };
+      }
+
+      const messageList = result.Messages.map(m =>
+        `• **${m.Subject}**\n  - MessageID: ${m.MessageID}\n  - To: ${m.Recipients.join(', ')}\n  - From: ${m.From}\n  - Status: ${m.Status}\n  - Date: ${m.ReceivedAt}\n  - Tag: ${m.Tag || 'none'}`
+      ).join('\n\n');
+
+      return {
+        content: [{
+          type: "text",
+          text: `Found ${result.TotalCount} messages (showing ${result.Messages.length}):\n\n${messageList}`
+        }]
+      };
+    }
+  );
+
+  server.tool(
+    "getMessageDetails",
+    {
+      messageId: z.string().describe("The MessageID of the email to retrieve details for")
+    },
+    async ({ messageId }) => {
+      console.error('Fetching message details..', { messageId });
+      const result = await postmarkClient.getOutboundMessageDetails(messageId);
+      console.error('Message details retrieved');
+
+      const events = (result.MessageEvents || []).map(e =>
+        `  - ${e.Type} at ${e.ReceivedAt}${e.Details?.Summary ? ` (${e.Details.Summary})` : ''}`
+      ).join('\n');
+
+      return {
+        content: [{
+          type: "text",
+          text: `Message Details\n\n` +
+            `MessageID: ${result.MessageID}\n` +
+            `Subject: ${result.Subject}\n` +
+            `From: ${result.From}\n` +
+            `To: ${(result.Recipients || []).join(', ')}\n` +
+            `Status: ${result.Status}\n` +
+            `Date: ${result.ReceivedAt}\n` +
+            `Tag: ${result.Tag || 'none'}\n` +
+            `${events ? `\nEvents:\n${events}` : '\nNo events recorded.'}`
+        }]
+      };
+    }
+  );
+
+  // ─────────────── Bounces ───────────────
+
+  server.tool(
+    "searchBounces",
+    {
+      type: z.enum([
+        "HardBounce", "SoftBounce", "SpamNotification", "SpamComplaint",
+        "Unsubscribe", "AddressChange", "AutoResponder", "ChallengeVerification",
+        "DmarcPolicy", "ManuallyDeactivated", "Transient", "SMTPApiError",
+        "InboundError", "DNSError", "BadEmailAddress", "TemplateRenderingFailed"
+      ]).optional().describe("Filter by bounce type"),
+      inactive: z.boolean().optional().describe("Filter by deactivated status"),
+      emailFilter: z.string().optional().describe("Filter by full or partial email address"),
+      tag: z.string().optional().describe("Filter by tag"),
+      messageID: z.string().optional().describe("Filter by original message ID"),
+      fromDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Start date in YYYY-MM-DD format"),
+      toDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("End date in YYYY-MM-DD format"),
+      count: z.number().int().min(1).max(500).optional().describe("Number of results (default 50, max 500)"),
+      offset: z.number().int().min(0).optional().describe("Pagination offset (default 0)")
+    },
+    async ({ type, inactive, emailFilter, tag, messageID, fromDate, toDate, count, offset }) => {
+      const filter = {};
+      if (type) filter.type = type;
+      if (inactive !== undefined) filter.inactive = inactive;
+      if (emailFilter) filter.emailFilter = emailFilter;
+      if (tag) filter.tag = tag;
+      if (messageID) filter.messageID = messageID;
+      if (fromDate) filter.fromdate = fromDate;
+      if (toDate) filter.todate = toDate;
+      filter.count = count || 50;
+      filter.offset = offset || 0;
+
+      console.error('Searching bounces..', filter);
+      const result = await postmarkClient.getBounces(filter);
+      console.error(`Found ${result.TotalCount} bounces`);
+
+      if (result.Bounces.length === 0) {
+        return { content: [{ type: "text", text: "No bounces found matching your criteria." }] };
+      }
+
+      const bounceList = result.Bounces.map(b =>
+        `• **${b.Email}**\n  - BounceID: ${b.ID}\n  - Type: ${b.Type} (${b.TypeCode})\n  - Description: ${b.Description}\n  - Date: ${b.BouncedAt}\n  - Inactive: ${b.Inactive}\n  - Can Activate: ${b.CanActivate}\n  - Subject: ${b.Subject || 'N/A'}\n  - Tag: ${b.Tag || 'none'}`
+      ).join('\n\n');
+
+      return {
+        content: [{
+          type: "text",
+          text: `Found ${result.TotalCount} bounces (showing ${result.Bounces.length}):\n\n${bounceList}`
+        }]
+      };
+    }
+  );
+
+  server.tool(
+    "getBounceDump",
+    {
+      bounceId: z.number().int().describe("The ID of the bounce to retrieve the SMTP dump for")
+    },
+    async ({ bounceId }) => {
+      console.error('Fetching bounce dump..', { bounceId });
+      const result = await postmarkClient.getBounceDump(bounceId);
+      console.error('Bounce dump retrieved');
+
+      return {
+        content: [{
+          type: "text",
+          text: result.Body
+            ? `SMTP Bounce Dump (Bounce ID: ${bounceId}):\n\n${result.Body}`
+            : `No SMTP dump available for bounce ${bounceId}. Dumps are retained for 30 days.`
+        }]
+      };
+    }
+  );
+
+  server.tool(
+    "activateBounce",
+    {
+      bounceId: z.number().int().describe("The ID of the bounce to reactivate")
+    },
+    async ({ bounceId }) => {
+      console.error('Activating bounce..', { bounceId });
+      const result = await postmarkClient.activateBounce(bounceId);
+      console.error('Bounce activated');
+
+      return {
+        content: [{
+          type: "text",
+          text: `Bounce reactivated successfully!\n\n` +
+            `Bounce ID: ${result.Bounce.ID}\n` +
+            `Email: ${result.Bounce.Email}\n` +
+            `Message: ${result.Message}`
+        }]
+      };
+    }
+  );
+
+  // ─────────────── Suppressions ───────────────
+
+  server.tool(
+    "listSuppressions",
+    {
+      messageStream: z.string().optional().describe("Message stream ID (default: DEFAULT_MESSAGE_STREAM)"),
+      suppressionReason: z.enum(["HardBounce", "SpamComplaint", "ManualSuppression"]).optional().describe("Filter by suppression reason"),
+      origin: z.enum(["Recipient", "Customer", "Admin"]).optional().describe("Filter by suppression origin"),
+      emailAddress: z.string().optional().describe("Filter by full or partial email address"),
+      fromDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Start date in YYYY-MM-DD format"),
+      toDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("End date in YYYY-MM-DD format")
+    },
+    async ({ messageStream, suppressionReason, origin, emailAddress, fromDate, toDate }) => {
+      const stream = messageStream || defaultMessageStream;
+      const filter = {};
+      if (suppressionReason) filter.SuppressionReason = suppressionReason;
+      if (origin) filter.Origin = origin;
+      if (emailAddress) filter.EmailAddress = emailAddress;
+      if (fromDate) filter.fromdate = fromDate;
+      if (toDate) filter.todate = toDate;
+
+      console.error('Fetching suppressions..', { stream, filter });
+      const result = await postmarkClient.getSuppressions(stream, filter);
+      console.error(`Found ${result.Suppressions.length} suppressions`);
+
+      if (result.Suppressions.length === 0) {
+        return { content: [{ type: "text", text: `No suppressions found on stream "${stream}" matching your criteria.` }] };
+      }
+
+      const list = result.Suppressions.map(s =>
+        `• **${s.EmailAddress}**\n  - Reason: ${s.SuppressionReason}\n  - Origin: ${s.Origin}\n  - Created: ${s.CreatedAt}`
+      ).join('\n\n');
+
+      return {
+        content: [{
+          type: "text",
+          text: `Found ${result.Suppressions.length} suppressions (stream: ${stream}):\n\n${list}`
+        }]
+      };
+    }
+  );
+
+  server.tool(
+    "createSuppressions",
+    {
+      emailAddresses: z.array(z.string().email()).min(1).max(50).describe("Email addresses to suppress (max 50)"),
+      messageStream: z.string().optional().describe("Message stream ID (default: DEFAULT_MESSAGE_STREAM)")
+    },
+    async ({ emailAddresses, messageStream }) => {
+      const stream = messageStream || defaultMessageStream;
+      const options = {
+        Suppressions: emailAddresses.map(email => ({ EmailAddress: email }))
+      };
+
+      console.error('Creating suppressions..', { count: emailAddresses.length, stream });
+      const result = await postmarkClient.createSuppressions(stream, options);
+      console.error('Suppressions created');
+
+      const list = result.Suppressions.map(s =>
+        `• ${s.EmailAddress}: ${s.Status}${s.Message ? ` — ${s.Message}` : ''}`
+      ).join('\n');
+
+      return {
+        content: [{
+          type: "text",
+          text: `Suppression results (stream: ${stream}):\n\n${list}`
+        }]
+      };
+    }
+  );
+
+  server.tool(
+    "deleteSuppressions",
+    {
+      emailAddresses: z.array(z.string().email()).min(1).max(50).describe("Email addresses to unsuppress (max 50). Note: SpamComplaint suppressions cannot be deleted."),
+      messageStream: z.string().optional().describe("Message stream ID (default: DEFAULT_MESSAGE_STREAM)")
+    },
+    async ({ emailAddresses, messageStream }) => {
+      const stream = messageStream || defaultMessageStream;
+      const options = {
+        Suppressions: emailAddresses.map(email => ({ EmailAddress: email }))
+      };
+
+      console.error('Deleting suppressions..', { count: emailAddresses.length, stream });
+      const result = await postmarkClient.deleteSuppressions(stream, options);
+      console.error('Suppressions deleted');
+
+      const list = result.Suppressions.map(s =>
+        `• ${s.EmailAddress}: ${s.Status}${s.Message ? ` — ${s.Message}` : ''}`
+      ).join('\n');
+
+      return {
+        content: [{
+          type: "text",
+          text: `Suppression deletion results (stream: ${stream}):\n\n${list}`
+        }]
+      };
+    }
+  );
+
+  // ─────────────── Stats & Server ───────────────
+
+  server.tool(
+    "getDeliveryStats",
+    {
+      stat: z.enum([
+        "summary", "overview", "sent", "bounces", "spam", "tracked",
+        "opens", "openPlatforms", "openClients", "openReadTimes",
+        "clicks", "clickBrowsers", "clickPlatforms", "clickLocation"
+      ]).optional().describe("Which stat to retrieve. Default 'summary' returns headline open/click/bounce rates."),
+      tag: z.string().optional().describe("Filter by tag"),
+      fromDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Start date in YYYY-MM-DD format"),
+      toDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("End date in YYYY-MM-DD format"),
+      messageStream: z.string().optional().describe("Filter by message stream ID")
+    },
+    async ({ stat, tag, fromDate, toDate, messageStream }) => {
+      const filter = {};
+      if (tag) filter.tag = tag;
+      if (fromDate) filter.fromdate = fromDate;
+      if (toDate) filter.todate = toDate;
+      if (messageStream) filter.messagestream = messageStream;
+
+      const requested = stat || "summary";
+      console.error('Fetching stats..', { stat: requested, filter });
+
+      const fetchers = {
+        summary:        () => postmarkClient.getOutboundOverview(filter),
+        overview:       () => postmarkClient.getOutboundOverview(filter),
+        sent:           () => postmarkClient.getSentCounts(filter),
+        bounces:        () => postmarkClient.getBounceCounts(filter),
+        spam:           () => postmarkClient.getSpamComplaintsCounts(filter),
+        tracked:        () => postmarkClient.getTrackedEmailCounts(filter),
+        opens:          () => postmarkClient.getEmailOpenCounts(filter),
+        openPlatforms:  () => postmarkClient.getEmailOpenPlatformUsage(filter),
+        openClients:    () => postmarkClient.getEmailOpenClientUsage(filter),
+        openReadTimes:  () => postmarkClient.getEmailOpenReadTimes(filter),
+        clicks:         () => postmarkClient.getClickCounts(filter),
+        clickBrowsers:  () => postmarkClient.getClickBrowserUsage(filter),
+        clickPlatforms: () => postmarkClient.getClickPlatformUsage(filter),
+        clickLocation:  () => postmarkClient.getClickLocation(filter),
+      };
+
+      const data = await fetchers[requested]();
+      console.error('Stats retrieved');
+
+      const text = requested === "summary"
+        ? fmtDeliverySummary(data, { fromDate, toDate, tag, messageStream })
+        : fmtStatResponse(requested, data);
+
+      return { content: [{ type: "text", text }] };
+    }
+  );
+
+  server.tool(
+    "getServerInfo",
+    {},
+    async () => {
+      console.error('Fetching server info..');
+      const result = await postmarkClient.getServer();
+      console.error('Server info retrieved');
+
+      return {
+        content: [{
+          type: "text",
+          text: `Server: ${result.Name}\n\n` +
+            `ID: ${result.ID}\n` +
+            `Color: ${result.Color}\n` +
+            `SMTP Activated: ${result.SmtpApiActivated}\n` +
+            `Inbound Address: ${result.InboundAddress || 'none'}\n` +
+            `Inbound Domain: ${result.InboundDomain || 'none'}\n\n` +
+            `Tracking:\n` +
+            `  Open Tracking: ${result.TrackOpens}\n` +
+            `  Link Tracking: ${result.TrackLinks}\n` +
+            `  First Open Only: ${result.PostFirstOpenOnly}\n\n` +
+            `Webhooks:\n` +
+            `  Bounce: ${result.BounceHookUrl || 'none'}\n` +
+            `  Open: ${result.OpenHookUrl || 'none'}\n` +
+            `  Delivery: ${result.DeliveryHookUrl || 'none'}\n` +
+            `  Click: ${result.ClickHookUrl || 'none'}\n` +
+            `  Inbound: ${result.InboundHookUrl || 'none'}`
+        }]
+      };
+    }
+  );
+
+  // ─────────────── Webhooks ───────────────
+
+  server.tool(
+    "listWebhooks",
+    {
+      messageStream: z.string().optional().describe("Filter by message stream ID (e.g. 'outbound')")
+    },
+    async ({ messageStream }) => {
+      const filter = {};
+      if (messageStream) filter.MessageStream = messageStream;
+
+      console.error('Fetching webhooks..', filter);
+      const result = await postmarkClient.getWebhooks(filter);
+      console.error(`Found ${result.Webhooks.length} webhooks`);
+
+      if (result.Webhooks.length === 0) {
+        return { content: [{ type: "text", text: "No webhooks configured." }] };
+      }
+
+      const list = result.Webhooks.map(w => {
+        const triggers = [];
+        if (w.Triggers?.Open?.Enabled) triggers.push('Open');
+        if (w.Triggers?.Click?.Enabled) triggers.push('Click');
+        if (w.Triggers?.Delivery?.Enabled) triggers.push('Delivery');
+        if (w.Triggers?.Bounce?.Enabled) triggers.push('Bounce');
+        if (w.Triggers?.SpamComplaint?.Enabled) triggers.push('SpamComplaint');
+        if (w.Triggers?.SubscriptionChange?.Enabled) triggers.push('SubscriptionChange');
+
+        return `• **${w.Url}**\n  - ID: ${w.ID}\n  - Stream: ${w.MessageStream || 'all'}\n  - Triggers: ${triggers.join(', ') || 'none'}`;
+      }).join('\n\n');
+
+      return {
+        content: [{
+          type: "text",
+          text: `Found ${result.Webhooks.length} webhooks:\n\n${list}`
+        }]
+      };
+    }
+  );
+
+  server.tool(
+    "createWebhook",
+    {
+      url: z.string().url().describe("The webhook URL to receive POST requests"),
+      messageStream: z.string().optional().describe("Message stream ID (e.g. 'outbound')"),
+      openEnabled: z.boolean().optional().describe("Trigger on email opens"),
+      clickEnabled: z.boolean().optional().describe("Trigger on link clicks"),
+      deliveryEnabled: z.boolean().optional().describe("Trigger on email delivery"),
+      bounceEnabled: z.boolean().optional().describe("Trigger on bounces"),
+      spamComplaintEnabled: z.boolean().optional().describe("Trigger on spam complaints"),
+      subscriptionChangeEnabled: z.boolean().optional().describe("Trigger on subscription changes")
+    },
+    async ({ url, messageStream, openEnabled, clickEnabled, deliveryEnabled, bounceEnabled, spamComplaintEnabled, subscriptionChangeEnabled }) => {
+      const anyTrigger = openEnabled || clickEnabled || deliveryEnabled ||
+        bounceEnabled || spamComplaintEnabled || subscriptionChangeEnabled;
+      if (!anyTrigger) {
+        throw new Error("At least one trigger must be enabled (openEnabled, clickEnabled, deliveryEnabled, bounceEnabled, spamComplaintEnabled, or subscriptionChangeEnabled)");
+      }
+
+      const options = {
+        Url: url,
+        Triggers: {
+          Open: { Enabled: openEnabled || false },
+          Click: { Enabled: clickEnabled || false },
+          Delivery: { Enabled: deliveryEnabled || false },
+          Bounce: { Enabled: bounceEnabled || false },
+          SpamComplaint: { Enabled: spamComplaintEnabled || false },
+          SubscriptionChange: { Enabled: subscriptionChangeEnabled || false }
+        }
+      };
+
+      if (messageStream) options.MessageStream = messageStream;
+
+      console.error('Creating webhook..', { url });
+      const result = await postmarkClient.createWebhook(options);
+      console.error('Webhook created: ', result.ID);
+
+      const triggers = [];
+      if (result.Triggers?.Open?.Enabled) triggers.push('Open');
+      if (result.Triggers?.Click?.Enabled) triggers.push('Click');
+      if (result.Triggers?.Delivery?.Enabled) triggers.push('Delivery');
+      if (result.Triggers?.Bounce?.Enabled) triggers.push('Bounce');
+      if (result.Triggers?.SpamComplaint?.Enabled) triggers.push('SpamComplaint');
+      if (result.Triggers?.SubscriptionChange?.Enabled) triggers.push('SubscriptionChange');
+
+      return {
+        content: [{
+          type: "text",
+          text: `Webhook created successfully!\n\n` +
+            `ID: ${result.ID}\n` +
+            `URL: ${result.Url}\n` +
+            `Stream: ${result.MessageStream || 'all'}\n` +
+            `Triggers: ${triggers.join(', ') || 'none'}`
+        }]
+      };
+    }
+  );
+
+  server.tool(
+    "deleteWebhook",
+    {
+      webhookId: z.number().int().describe("The ID of the webhook to delete")
+    },
+    async ({ webhookId }) => {
+      console.error('Deleting webhook..', { webhookId });
+      await postmarkClient.deleteWebhook(webhookId);
+      console.error('Webhook deleted');
+
+      return {
+        content: [{
+          type: "text",
+          text: `Webhook ${webhookId} deleted successfully.`
         }]
       };
     }

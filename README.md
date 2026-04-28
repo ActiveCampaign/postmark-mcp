@@ -3,11 +3,12 @@
 Send emails with Postmark using Claude and other MCP-compatible AI assistants.
 
 ## Features
-- Exposes a Model Context Protocol (MCP) server for sending emails via your [Postmark account](https://account.postmarkapp.com/sign_up)
+- Exposes a Model Context Protocol (MCP) server backed by your [Postmark account](https://account.postmarkapp.com/sign_up)
+- 21 tools spanning email sending, templates (CRUD + validation), message search, bounces, suppressions, stats, server info, and webhooks
 - Simple configuration via environment variables
 - Comprehensive error handling and graceful shutdown
 - Secure logging practices (no sensitive data exposure)
-- Automatic email tracking configuration
+- Automatic open/click tracking on every send
 
 ## Useful Docs
 - [📒 API Documentation](https://postmarkapp.com/developer)
@@ -24,7 +25,7 @@ Follow us on X - [@postmarkapp](https://x.com/postmarkapp)
 # Setup
 
 ## Requirements
-- Node.js (v16 or higher recommended)
+- Node.js v20 or higher
 - A [Postmark account](https://account.postmarkapp.com/sign_up) and server token
 
 ## Installation (Local Development)
@@ -71,6 +72,14 @@ yarn start
 bun start
 ```
 
+**Smoke test (requires valid `.env`):**
+
+```sh
+npm run smoke
+```
+
+Spawns the server over stdio and exercises every read-only tool against your Postmark account, plus the validation paths for `editTemplate` and `createWebhook`. Does not send mail or mutate state.
+
 ## Cursor Quick Install
 <div>
   <a href="cursor://anysphere.cursor-deeplink/mcp/install?name=Postmark&config=eyJjb21tYW5kIjoibm9kZSIsImFyZ3MiOlsiaW5kZXguanMiXSwiZW52Ijp7IlBPU1RNQVJLX1NFUlZFUl9UT0tFTiI6IiIsIkRFRkFVTFRfU0VOREVSX0VNQUlMIjoiIiwiREVGQVVMVF9NRVNTQUdFX1NUUkVBTSI6Im91dGJvdW5kIn19">
@@ -102,24 +111,48 @@ After installing the MCP, update your configuration to set:
 ```
 
 ## Tools
-This section provides a complete reference for the Postmark MCP server tools including example prompts and payloads.
+This section provides a complete reference for the Postmark MCP server tools including example prompts and payloads. The server registers **21 tools** organized into seven categories.
 
 ### Table of Contents
-- [Email Management Tools](#email-management-tools)
-  - [sendEmail](#1-sendemail)
-  - [sendEmailWithTemplate](#2-sendemailwithtemplate)
-- [Template Management Tools](#template-management-tools)
-  - [listTemplates](#3-listtemplates)
-- [Statistics & Tracking Tools](#statistics--tracking-tools)
-  - [getDeliveryStats](#4-getdeliverystats)
+- [Email](#email)
+  - [sendEmail](#sendemail)
+  - [sendEmailWithTemplate](#sendemailwithtemplate)
+- [Templates](#templates)
+  - [listTemplates](#listtemplates)
+  - [getTemplate](#gettemplate)
+  - [createTemplate](#createtemplate)
+  - [editTemplate](#edittemplate)
+  - [deleteTemplate](#deletetemplate)
+  - [validateTemplate](#validatetemplate)
+- [Messages](#messages)
+  - [searchOutboundMessages](#searchoutboundmessages)
+  - [getMessageDetails](#getmessagedetails)
+- [Bounces](#bounces)
+  - [searchBounces](#searchbounces)
+  - [getBounceDump](#getbouncedump)
+  - [activateBounce](#activatebounce)
+- [Suppressions](#suppressions)
+  - [listSuppressions](#listsuppressions)
+  - [createSuppressions](#createsuppressions)
+  - [deleteSuppressions](#deletesuppressions)
+- [Stats & Server](#stats--server)
+  - [getDeliveryStats](#getdeliverystats)
+  - [getServerInfo](#getserverinfo)
+- [Webhooks](#webhooks)
+  - [listWebhooks](#listwebhooks)
+  - [createWebhook](#createwebhook)
+  - [deleteWebhook](#deletewebhook)
 
-## Email Management Tools
-### 1. sendEmail
-Sends a single text email.
+---
+
+## Email
+
+### sendEmail
+Sends a single text (and optional HTML) email.
 
 **Example Prompt:**
 ```
-Send an email using Postmark to recipient@example.com with the subject "Meeting Reminder" and the message "Don't forget our team meeting tomorrow at 2 PM. Please bring your quarterly statistics report (and maybe some snacks).""
+Send an email using Postmark to recipient@example.com with the subject "Meeting Reminder" and the message "Don't forget our team meeting tomorrow at 2 PM."
 ```
 
 **Expected Payload:**
@@ -127,113 +160,306 @@ Send an email using Postmark to recipient@example.com with the subject "Meeting 
 {
   "to": "recipient@example.com",
   "subject": "Meeting Reminder",
-  "textBody": "Don't forget our team meeting tomorrow at 2 PM. Please bring your quarterly statistics report (and maybe some snacks).",
-  "htmlBody": "HTML version of the email body", // Optional
-  "from": "sender@example.com", // Optional, uses DEFAULT_SENDER_EMAIL if not provided
-  "tag": "meetings" // Optional
+  "textBody": "Don't forget our team meeting tomorrow at 2 PM.",
+  "htmlBody": "<p>Don't forget our team meeting tomorrow at 2 PM.</p>",
+  "from": "sender@example.com",
+  "tag": "meetings"
 }
 ```
 
-**Response Format:**
+`htmlBody`, `from`, and `tag` are optional. If `from` is omitted, `DEFAULT_SENDER_EMAIL` is used.
+
+**Response:**
 ```
 Email sent successfully!
-MessageID: message-id-here
+MessageID: 0a1b2c3d-...
 To: recipient@example.com
 Subject: Meeting Reminder
 ```
 
-### 2. sendEmailWithTemplate
-Sends an email using a pre-defined template.
+### sendEmailWithTemplate
+Sends an email using a Postmark template.
 
 **Example Prompt:**
 ```
-Send an email with Postmark template alias "welcome" to customer@example.com with the following template variables:
-{
-  "name": "John Doe",
-  "product_name": "MyApp",
-  "login_url": "https://myapp.com/login"
-}
+Send the "welcome" template to customer@example.com with name "John Doe" and login_url "https://myapp.com/login".
 ```
 
 **Expected Payload:**
 ```json
 {
   "to": "customer@example.com",
-  "templateId": 12345, // Either templateId or templateAlias must be provided, but not both
-  "templateAlias": "welcome", // Either templateId or templateAlias must be provided, but not both
+  "templateAlias": "welcome",
   "templateModel": {
     "name": "John Doe",
-    "product_name": "MyApp",
     "login_url": "https://myapp.com/login"
   },
-  "from": "sender@example.com", // Optional, uses DEFAULT_SENDER_EMAIL if not provided
-  "tag": "onboarding" // Optional
+  "from": "sender@example.com",
+  "tag": "onboarding"
 }
 ```
 
-**Response Format:**
+Provide **either** `templateId` (number) **or** `templateAlias` (string), not both.
+
+**Response:**
 ```
 Template email sent successfully!
-MessageID: message-id-here
-To: recipient@example.com
-Template: template-id-or-alias-here
+MessageID: 0a1b2c3d-...
+To: customer@example.com
+Template: welcome
 ```
 
-## Template Management Tools
-### 3. listTemplates
+---
 
-Lists all available templates.
+## Templates
 
-**Example Prompt:**
+### listTemplates
+Lists all templates on the server.
+
+**Response:**
 ```
-Show me a list of all the email templates available in our Postmark account.
-```
+Found 2 templates:
 
-**Response Format:**
-```
-📋 Found 2 templates:
-
-• Basic
+• **Welcome**
   - ID: 12345678
-  - Alias: basic
-  - Subject: none
-
-• Welcome
-  - ID: 02345679
   - Alias: welcome
-  - Subject: none
+  - Subject: Welcome to {{product_name}}
 ```
 
-## Statistics & Tracking Tools
-### 4. getDeliveryStats
+### getTemplate
+Retrieves a single template's full content (HTML body, text body, subject, type).
 
-Retrieves email delivery statistics.
+**Payload:** `{ "templateIdOrAlias": "welcome" }` — accepts numeric ID or string alias.
 
-**Example Prompt:**
-```
-Show me our Postmark email delivery statistics from 2025-05-01 to 2025-05-15 for the "marketing" tag.
-```
+### createTemplate
+Creates a new template. Requires `name` and `subject`. At least one of `htmlBody` or `textBody` must be provided.
 
 **Expected Payload:**
 ```json
 {
-  "tag": "marketing", // Optional
-  "fromDate": "2025-05-01", // Optional, YYYY-MM-DD format
-  "toDate": "2025-05-15" // Optional, YYYY-MM-DD format
+  "name": "Order Confirmation",
+  "subject": "Your order #{{order_id}} is confirmed",
+  "htmlBody": "<h1>Thanks {{name}}</h1>",
+  "textBody": "Thanks {{name}}",
+  "alias": "order-confirmation",
+  "templateType": "Standard"
 }
 ```
 
-**Response Format:**
+`templateType` may be `"Standard"` (default) or `"Layout"`.
+
+### editTemplate
+Updates an existing template. Requires `templateIdOrAlias` plus **at least one** updated field (`name`, `subject`, `htmlBody`, `textBody`, or `alias`).
+
+### deleteTemplate
+Deletes a template by ID or alias.
+
+**Payload:** `{ "templateIdOrAlias": "order-confirmation" }`
+
+### validateTemplate
+Validates template content (Mustachio syntax, undefined variables) without saving. At least one of `subject`, `htmlBody`, or `textBody` is required.
+
+**Expected Payload:**
+```json
+{
+  "subject": "Order #{{order_id}}",
+  "htmlBody": "<p>Thanks {{name}}</p>",
+  "textBody": "Thanks {{name}}",
+  "testRenderModel": { "order_id": 42, "name": "John" },
+  "templateType": "Standard"
+}
 ```
-Email Statistics Summary
 
-Sent: 100 emails
-Open Rate: 45.5% (45/99 tracked emails)
-Click Rate: 15.2% (15/99 tracked links)
+---
 
-Period: 2025-05-01 to 2025-05-15
+## Messages
+
+### searchOutboundMessages
+Searches the outbound message history.
+
+**Expected Payload (all filters optional):**
+```json
+{
+  "recipient": "user@example.com",
+  "fromEmail": "sender@example.com",
+  "tag": "marketing",
+  "subject": "Welcome",
+  "status": "sent",
+  "messageStream": "outbound",
+  "fromDate": "2025-05-01",
+  "toDate": "2025-05-15",
+  "count": 50,
+  "offset": 0
+}
+```
+
+`status` is one of `queued`, `sent`, `processed`. `count` is 1–500 (default 50).
+
+### getMessageDetails
+Retrieves full details and event timeline for a single outbound message.
+
+**Payload:** `{ "messageId": "0a1b2c3d-..." }`
+
+---
+
+## Bounces
+
+### searchBounces
+Searches the bounce log with optional filters by type, recipient, tag, message ID, date range, and active/inactive status.
+
+**Expected Payload (all optional):**
+```json
+{
+  "type": "HardBounce",
+  "inactive": true,
+  "emailFilter": "@example.com",
+  "tag": "marketing",
+  "messageID": "0a1b2c3d-...",
+  "fromDate": "2025-05-01",
+  "toDate": "2025-05-15",
+  "count": 50,
+  "offset": 0
+}
+```
+
+Supported `type` values: `HardBounce`, `SoftBounce`, `SpamNotification`, `SpamComplaint`, `Unsubscribe`, `AddressChange`, `AutoResponder`, `ChallengeVerification`, `DmarcPolicy`, `ManuallyDeactivated`, `Transient`, `SMTPApiError`, `InboundError`, `DNSError`, `BadEmailAddress`, `TemplateRenderingFailed`.
+
+### getBounceDump
+Returns the raw SMTP dump for a bounce. Bounce dumps are retained for 30 days.
+
+**Payload:** `{ "bounceId": 123456 }`
+
+### activateBounce
+Reactivates a deactivated email address (only bounces where `CanActivate: true`).
+
+**Payload:** `{ "bounceId": 123456 }`
+
+---
+
+## Suppressions
+
+### listSuppressions
+Lists suppressions for a message stream.
+
+**Expected Payload (all optional):**
+```json
+{
+  "messageStream": "outbound",
+  "suppressionReason": "HardBounce",
+  "origin": "Recipient",
+  "emailAddress": "user@example.com",
+  "fromDate": "2025-05-01",
+  "toDate": "2025-05-15"
+}
+```
+
+`suppressionReason` ∈ `HardBounce`, `SpamComplaint`, `ManualSuppression`. `origin` ∈ `Recipient`, `Customer`, `Admin`. If `messageStream` is omitted, `DEFAULT_MESSAGE_STREAM` is used.
+
+### createSuppressions
+Suppresses up to 50 email addresses on a message stream.
+
+**Payload:** `{ "emailAddresses": ["a@example.com", "b@example.com"], "messageStream": "outbound" }`
+
+### deleteSuppressions
+Removes up to 50 addresses from the suppression list. Note: `SpamComplaint` suppressions cannot be deleted.
+
+**Payload:** `{ "emailAddresses": ["a@example.com"], "messageStream": "outbound" }`
+
+---
+
+## Stats & Server
+
+### getDeliveryStats
+Unified stats tool. Default behavior returns a friendly headline summary; pass an optional `stat` for a focused breakdown.
+
+**Expected Payload (all optional):**
+```json
+{
+  "stat": "summary",
+  "tag": "marketing",
+  "fromDate": "2025-05-01",
+  "toDate": "2025-05-15",
+  "messageStream": "outbound"
+}
+```
+
+Supported `stat` values:
+
+| `stat` | What it returns |
+|---|---|
+| `summary` *(default)* | Headline open / click / bounce / spam rates |
+| `overview` | All overview counts (sent, tracked, opens, clicks, bounces, …) |
+| `sent` | Sent count |
+| `bounces` | Bounce breakdown by type |
+| `spam` | Spam complaint count |
+| `tracked` | Tracked email count |
+| `opens` | Total + unique opens |
+| `openPlatforms` | Open platform breakdown (Desktop / Mobile / WebMail / Unknown) |
+| `openClients` | Top 10 email clients (Apple Mail, Gmail, …) |
+| `openReadTimes` | Read-time histogram |
+| `clicks` | Total + unique link clicks |
+| `clickBrowsers` | Top 10 browsers used to click |
+| `clickPlatforms` | Click platform breakdown (Desktop / Mobile / WebMail / Unknown) |
+| `clickLocation` | HTML vs. plain-text click location |
+
+**Default summary response:**
+```
+Email Delivery Summary
+
+Sent:        74
+Tracked:     33  (44.6% of sent)
+Open rate:   93.9%  (31/33 unique opens)
+Click rate:  4.8%  (10/207 unique links clicked)
+Bounced:     1  (1.4%)
+Spam:        0  (0.0%)
+
+Period: 2025-05-01 → 2025-05-15
 Tag: marketing
 ```
+
+**Sample `stat: "openPlatforms"` response:**
+```
+Open Platform Usage
+
+  Desktop        20  (64.5%)
+  Mobile          0  (0.0%)
+  WebMail        11  (35.5%)
+  Unknown         0  (0.0%)
+```
+
+### getServerInfo
+Returns the Postmark server's name, color, tracking settings, and webhook URLs.
+
+**Payload:** `{}`
+
+---
+
+## Webhooks
+
+### listWebhooks
+Lists configured webhooks. Optional `messageStream` filter.
+
+### createWebhook
+Creates a webhook subscription. Requires a `url` and **at least one** trigger.
+
+**Expected Payload:**
+```json
+{
+  "url": "https://example.com/postmark-hook",
+  "messageStream": "outbound",
+  "openEnabled": true,
+  "clickEnabled": true,
+  "deliveryEnabled": false,
+  "bounceEnabled": true,
+  "spamComplaintEnabled": true,
+  "subscriptionChangeEnabled": false
+}
+```
+
+### deleteWebhook
+Deletes a webhook by ID.
+
+**Payload:** `{ "webhookId": 1234567 }`
 
 ## Implementation Details
 ### Automatic Configuration
