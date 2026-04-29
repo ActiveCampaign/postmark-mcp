@@ -10,8 +10,9 @@ Official Postmark MCP (Model Context Protocol) server that enables AI assistants
 
 - **Run server:** `npm start` (runs `node index.js`)
 - **Debug with MCP Inspector:** `npm run inspector` (launches `@modelcontextprotocol/inspector`)
-- **Smoke test (read-only, 23 checks):** `npm run smoke` — runs [smoke-test.mjs](smoke-test.mjs). Spawns the server over stdio and exercises every read-only tool against the live Postmark account configured in `.env`. Does not send mail or mutate state.
-- **Smoke test (mutating, 14 checks):** `node smoke-test-mutating.mjs` — runs full create→edit→delete lifecycles for templates, webhooks, and suppressions, plus two real email sends between the user's verified addresses. Cleans up after itself. Edit the `SENDER` and `RECIPIENT` constants at the top before running on a different account.
+- **Smoke test (read-only):** `npm run smoke` — runs `smoke-test.mjs`, which is created from [smoke-test.example.mjs](smoke-test.example.mjs). Spawns the server over stdio and exercises every read-only tool against the live Postmark account configured in `.env`. Does not send mail or mutate state.
+- **Smoke test (mutating):** `node smoke-test-mutating.mjs` — runs full create→edit→delete lifecycles for templates (including layout binding), webhooks, and suppressions, plus real email sends between two configured verified addresses. Cleans up after itself. Created from [smoke-test-mutating.example.mjs](smoke-test-mutating.example.mjs); edit `SENDER` and `RECIPIENT` before running. The script refuses to run with the placeholder values still in place.
+- **`smoke-test.mjs` and `smoke-test-mutating.mjs` are gitignored.** Copy from the `*.example.mjs` counterparts; this keeps personal verified-sender addresses out of the repo.
 - **No linter is configured.**
 
 ## Architecture

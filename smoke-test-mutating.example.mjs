@@ -1,18 +1,49 @@
 // Mutating smoke test for the Postmark MCP server.
-// Runs full lifecycles for templates, webhooks, suppressions, and sends two
-// real emails between Jabal's verified addresses. Cleans up after itself.
+//
+// SETUP:
+//   1. Copy this file to `smoke-test-mutating.mjs`:
+//        cp smoke-test-mutating.example.mjs smoke-test-mutating.mjs
+//   2. Edit SENDER and RECIPIENT below to two of YOUR verified Postmark
+//      addresses. Both must be sender signatures on the same Postmark account.
+//   3. Ensure your `.env` has POSTMARK_SERVER_TOKEN, DEFAULT_SENDER_EMAIL,
+//      and DEFAULT_MESSAGE_STREAM set.
+//   4. Run:   node smoke-test-mutating.mjs
+//
+// `smoke-test-mutating.mjs` is gitignored so your local copy stays out
+// of the repo.
+//
+// This script runs full create→edit→delete lifecycles for templates,
+// layouts, webhooks, and suppressions, plus real email sends from SENDER
+// to RECIPIENT (single, templated, batch of 3, template-batch of 2 — total
+// 7 emails). It cleans up after itself; check your inbox to confirm sends.
 
 import "dotenv/config";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
-const SENDER = "recipient@example.com";       // DEFAULT_SENDER_EMAIL
-const RECIPIENT = "recipient@example.com";   // another verified address
+// ─── Configuration ─────────────────────────────────────────────────────
+// REPLACE these placeholders with your verified Postmark sender signatures.
+// SENDER is typically your DEFAULT_SENDER_EMAIL; RECIPIENT can be any
+// verified address on the same account that you have access to read.
+const SENDER = "you@example.com";          // your DEFAULT_SENDER_EMAIL
+const RECIPIENT = "another-you@example.com"; // any verified address you control
+// ──────────────────────────────────────────────────────────────────────
+
+// Guard against running with placeholder values — refuses to send mail
+// from clearly-illustrative addresses.
+const PLACEHOLDERS = ["you@example.com", "another-you@example.com"];
+if (PLACEHOLDERS.includes(SENDER) || PLACEHOLDERS.includes(RECIPIENT)) {
+  console.error("Error: SENDER and RECIPIENT are still set to placeholder values.");
+  console.error("Edit the constants near the top of this file with your verified");
+  console.error("Postmark sender signatures before running.");
+  process.exit(1);
+}
+
 const ts = Date.now();
 const TEMPLATE_ALIAS = `mcp-smoke-${ts}`;
 const LAYOUT_ALIAS = `mcp-smoke-layout-${ts}`;
 const WEBHOOK_URL = `https://example.com/mcp-smoke-${ts}`;
-const SUPPRESS_EMAIL = `mcp-smoke-${ts}@example.com`; // fake local-part on user's domain
+const SUPPRESS_EMAIL = `mcp-smoke-${ts}@example.com`;
 
 const transport = new StdioClientTransport({ command: "node", args: ["index.js"] });
 const client = new Client({ name: "smoke-mutating", version: "0.0.0" }, { capabilities: {} });
@@ -83,7 +114,7 @@ try {
     subject: "Hello {{name}}",
     htmlBody: "<h1>Hi {{name}}</h1>",
     textBody: "Hi {{name}}",
-    testRenderModel: { name: "Jabal" },
+    testRenderModel: { name: "Test User" },
   });
   log("validateTemplate (valid)", r.ok && /ALL VALID/.test(r.text), r.text);
 
@@ -140,7 +171,7 @@ try {
     to: RECIPIENT,
     from: SENDER,
     templateAlias: TEMPLATE_ALIAS,
-    templateModel: { name: "Jabal" },
+    templateModel: { name: "Test User" },
     tag: "mcp-smoke-test",
   });
   log("sendEmailWithTemplate (real send)", r.ok, r.text);
@@ -162,8 +193,8 @@ try {
     from: SENDER,
     tag: "mcp-smoke-test",
     recipients: [
-      { to: RECIPIENT, templateModel: { name: "Jabal (batch 1)" } },
-      { to: RECIPIENT, templateModel: { name: "Jabal (batch 2)" } },
+      { to: RECIPIENT, templateModel: { name: "Test User (batch 1)" } },
+      { to: RECIPIENT, templateModel: { name: "Test User (batch 2)" } },
     ],
   });
   log("sendBatchWithTemplate (real sends)",

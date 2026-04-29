@@ -11,3 +11,8 @@ yarn-debug.log*
 yarn-error.log*
 logs/
 .idea/
+
+# Local smoke-test copies (created from *.example.mjs counterparts).
+# Keep personal verified-sender addresses out of the repo.
+smoke-test.mjs
+smoke-test-mutating.mjs

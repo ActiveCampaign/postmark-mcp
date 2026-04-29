@@ -74,11 +74,22 @@ bun start
 
 **Smoke test (requires valid `.env`):**
 
+The repo ships two smoke-test example files. Copy each to its non-example name (which is gitignored) before running, so your local edits — including any verified-sender addresses — never end up committed.
+
 ```sh
+# Read-only suite (24 checks). Optionally edit RECIPIENT_WITH_HISTORY.
+cp smoke-test.example.mjs smoke-test.mjs
 npm run smoke
+
+# Mutating suite (full lifecycles + real email sends).
+# REQUIRED: edit SENDER and RECIPIENT to two of your verified addresses.
+cp smoke-test-mutating.example.mjs smoke-test-mutating.mjs
+node smoke-test-mutating.mjs
 ```
 
-Spawns the server over stdio and exercises every read-only tool against your Postmark account, plus the validation paths for `editTemplate` and `createWebhook`. Does not send mail or mutate state.
+The read-only suite spawns the server over stdio and exercises every read tool against your Postmark account, plus the validation paths for `editTemplate` and `createWebhook`. Does not send mail or mutate state.
+
+The mutating suite runs full create→edit→delete lifecycles for templates (including layout binding), webhooks, and suppressions, and sends real emails between the two addresses you configure. It cleans up after itself. The script refuses to run while the placeholder values are still in place.
 
 ## Cursor Quick Install
 <div>
