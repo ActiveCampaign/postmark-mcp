@@ -226,7 +226,7 @@ Template: welcome
 ```
 
 ### sendBatch
-Sends up to 500 emails in a single API call. Each message is fully independent (its own recipient, subject, body). Postmark's [bulk email API](https://postmarkapp.com/developer/api/bulk-email) handles the underlying batch — this tool wraps it and synthesizes a per-message success/failure summary.
+Sends up to 500 emails in a single API call. Each message is fully independent (its own recipient, subject, body). This wraps Postmark's batch email endpoint (`POST /email/batch`) and synthesizes a per-message success/failure summary. (For high-volume single-template sends, see Postmark's separate [bulk email API](https://postmarkapp.com/developer/api/bulk-email) at `/email/bulk` — not currently wrapped by this MCP.)
 
 **Expected Payload:**
 ```json

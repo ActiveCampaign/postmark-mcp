@@ -17,7 +17,7 @@ This release expands the MCP tool surface from 4 tools to 24, organized into eig
 
 - **20 new tools** across templates, messages, diagnostics, bounces, suppressions, webhooks, and server info. See the README "Tools" section for the complete reference.
 - **`diagnoseDelivery`** — composite triage tool. Answers "did my email reach X, and if not, why?" by running message search, suppression check, and bounce history in parallel for a recipient, then synthesizing a plain-English recommendation. First tool in a new "Diagnostics" category.
-- **`sendBatch`** and **`sendBatchWithTemplate`** — wraps Postmark's [bulk email API](https://postmarkapp.com/developer/api/bulk-email) (now GA). Up to 500 messages or templated recipients per call, with per-message success/failure reporting.
+- **`sendBatch`** and **`sendBatchWithTemplate`** — wraps Postmark's batch email endpoints (`/email/batch`, `/email/batchWithTemplates`). Send up to 500 distinct messages or templated recipients in a single HTTP request, with per-message success/failure reporting. Note: this is the *batch* API, not Postmark's separate *bulk* email API at `/email/bulk`. Wrapping `/email/bulk` is tracked as a v2.1 follow-up.
 - **Template CRUD + validation** — `getTemplate`, `createTemplate`, `editTemplate`, `deleteTemplate`, `validateTemplate`. End-to-end template authoring including layout binding (pass `layoutTemplate: "<alias>"` to bind, `null` to unbind).
 - **Message search and details** — `searchOutboundMessages` (with `messageStream` filter), `getMessageDetails` (full event timeline).
 - **Bounce tooling** — `searchBounces`, `getBounceDump`, `activateBounce`.
