@@ -14,6 +14,7 @@ Send emails with Postmark using Claude and other MCP-compatible AI assistants.
 - [📒 API Documentation](https://postmarkapp.com/developer)
 - [🔎 API Explorer](https://postmarkapp.com/api-explorer)
 - [📖 Engineering Articles](https://postmarkapp.com/blog/topics/engineering)
+- [📝 Changelog](CHANGELOG.md) — what's new in each release
 
 ## Feedback
 We'd love to hear from you! Please share your feedback and suggestions using our [feedback form](https://forms.gle/zVdZLAJPM81Vo2Wh8).
@@ -77,7 +78,7 @@ bun start
 The repo ships two smoke-test example files. Copy each to its non-example name (which is gitignored) before running, so your local edits — including any verified-sender addresses — never end up committed.
 
 ```sh
-# Read-only suite (24 checks). Optionally edit RECIPIENT_WITH_HISTORY.
+# Read-only suite (25 checks). Optionally edit RECIPIENT_WITH_HISTORY.
 cp smoke-test.example.mjs smoke-test.mjs
 npm run smoke
 
