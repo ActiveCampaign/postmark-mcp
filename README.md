@@ -442,7 +442,7 @@ When the recipient is suppressed, the recommendation differs based on reason: `S
 ## Bounces
 
 ### searchBounces
-Searches the bounce log with optional filters by type, recipient, tag, message ID, date range, and active/inactive status.
+Searches the bounce log with optional filters by type, recipient, tag, message ID, message stream, date range, and active/inactive status.
 
 **Expected Payload (all optional):**
 ```json
@@ -452,6 +452,7 @@ Searches the bounce log with optional filters by type, recipient, tag, message I
   "emailFilter": "@example.com",
   "tag": "marketing",
   "messageID": "0a1b2c3d-...",
+  "messageStream": "outbound",
   "fromDate": "2025-05-01",
   "toDate": "2025-05-15",
   "count": 50,
@@ -459,7 +460,7 @@ Searches the bounce log with optional filters by type, recipient, tag, message I
 }
 ```
 
-Supported `type` values: `HardBounce`, `SoftBounce`, `SpamNotification`, `SpamComplaint`, `Unsubscribe`, `AddressChange`, `AutoResponder`, `ChallengeVerification`, `DmarcPolicy`, `ManuallyDeactivated`, `Transient`, `SMTPApiError`, `InboundError`, `DNSError`, `BadEmailAddress`, `TemplateRenderingFailed`.
+Supported `type` values (matches Postmark's `BounceType` enum — 22 values): `AddressChange`, `AutoResponder`, `BadEmailAddress`, `Blocked`, `ChallengeVerification`, `DMARCPolicy`, `DnsError`, `HardBounce`, `InboundError`, `ManuallyDeactivated`, `OpenRelayTest`, `SMTPApiError`, `SoftBounce`, `SpamComplaint`, `SpamNotification`, `Subscribe`, `TemplateRenderingFailed`, `Transient`, `Unconfirmed`, `Unknown`, `Unsubscribe`, `VirusNotification`.
 
 ### getBounceDump
 Returns the raw SMTP dump for a bounce. Bounce dumps are retained for 30 days.

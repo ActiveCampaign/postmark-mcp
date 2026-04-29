@@ -927,27 +927,31 @@ function registerTools(server, postmarkClient) {
     "searchBounces",
     {
       type: z.enum([
-        "HardBounce", "SoftBounce", "SpamNotification", "SpamComplaint",
-        "Unsubscribe", "AddressChange", "AutoResponder", "ChallengeVerification",
-        "DmarcPolicy", "ManuallyDeactivated", "Transient", "SMTPApiError",
-        "InboundError", "DNSError", "BadEmailAddress", "TemplateRenderingFailed"
-      ]).optional().describe("Filter by bounce type"),
+        "AddressChange", "AutoResponder", "BadEmailAddress", "Blocked",
+        "ChallengeVerification", "DMARCPolicy", "DnsError", "HardBounce",
+        "InboundError", "ManuallyDeactivated", "OpenRelayTest", "SMTPApiError",
+        "SoftBounce", "SpamComplaint", "SpamNotification", "Subscribe",
+        "TemplateRenderingFailed", "Transient", "Unconfirmed", "Unknown",
+        "Unsubscribe", "VirusNotification"
+      ]).optional().describe("Filter by bounce type (matches Postmark's BounceType enum — 22 values)"),
       inactive: z.boolean().optional().describe("Filter by deactivated status"),
       emailFilter: z.string().optional().describe("Filter by full or partial email address"),
       tag: z.string().optional().describe("Filter by tag"),
       messageID: z.string().optional().describe("Filter by original message ID"),
+      messageStream: z.string().optional().describe("Filter by message stream ID (e.g. 'outbound')"),
       fromDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Start date in YYYY-MM-DD format"),
       toDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("End date in YYYY-MM-DD format"),
       count: z.number().int().min(1).max(500).optional().describe("Number of results (default 50, max 500)"),
       offset: z.number().int().min(0).optional().describe("Pagination offset (default 0)")
     },
-    async ({ type, inactive, emailFilter, tag, messageID, fromDate, toDate, count, offset }) => {
+    async ({ type, inactive, emailFilter, tag, messageID, messageStream, fromDate, toDate, count, offset }) => {
       const filter = {};
       if (type) filter.type = type;
       if (inactive !== undefined) filter.inactive = inactive;
       if (emailFilter) filter.emailFilter = emailFilter;
       if (tag) filter.tag = tag;
       if (messageID) filter.messageID = messageID;
+      if (messageStream) filter.messagestream = messageStream;
       if (fromDate) filter.fromdate = fromDate;
       if (toDate) filter.todate = toDate;
       filter.count = count || 50;
