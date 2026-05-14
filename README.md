@@ -84,6 +84,20 @@ After installing the MCP, update your configuration to set:
 - `DEFAULT_SENDER_EMAIL`
 - `DEFAULT_MESSAGE_STREAM` (default: `outbound`)
 
+## Operational Safety
+
+Run this MCP server only inside a trusted local MCP host. Do not expose it over a
+network transport or shared remote host.
+
+- Require explicit user approval before invoking `sendEmail` or
+  `sendEmailWithTemplate`.
+- Use least-privilege Postmark server tokens and message streams for the task.
+- Keep production tokens out of shared MCP configs, checked-in files, screenshots,
+  and support bundles.
+- Configure sender and recipient policy in the MCP host where available.
+- Use a test Postmark server or message stream for experiments, demos, and prompt
+  iteration.
+
 ## Claude and Cursor MCP Configuration Example
 ```json
 {
