@@ -26,7 +26,7 @@ This release expands the MCP tool surface from 4 tools to 24, organized into eig
 - **`getServerInfo`** — server name, color, tracking settings, configured webhook URLs.
 - **`getDeliveryStats` `stat` parameter (optional).** With no argument, returns a friendly summary (preserves v1 behavior). With `stat: "<name>"`, returns a polished per-stat breakdown. Supported values: `summary`, `overview`, `sent`, `bounces`, `spam`, `tracked`, `opens`, `openPlatforms`, `openClients`, `openReadTimes`, `clicks`, `clickBrowsers`, `clickPlatforms`, `clickLocation`.
 - **Validation guards** on `editTemplate`, `createWebhook`, `createTemplate`, `validateTemplate`, and `sendEmailWithTemplate` — misuse fails fast with a clear message instead of hitting the API.
-- **Smoke-test example harnesses** — `smoke-test.example.mjs` (read-only, 23 checks) and `smoke-test-mutating.example.mjs` (full lifecycles + real sends + cleanup, 14 checks). Copy to the non-example name (gitignored) and edit verified-sender addresses to use. The mutating harness includes a startup guard that refuses to run with placeholder values.
+- **Smoke-test example harnesses** — `smoke-test.example.mjs` (read-only, 25 checks) and `smoke-test-mutating.example.mjs` (full lifecycles + real sends + cleanup, 23 checks). Copy to the non-example name (gitignored) and edit verified-sender addresses to use. The mutating harness includes a startup guard that refuses to run with placeholder values.
 
 ### Changed
 
