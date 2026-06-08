@@ -10,11 +10,60 @@ import 'dotenv/config';
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import postmark from "postmark";
+import { createRequire } from 'module';
+import { randomUUID } from 'crypto';
+
+const require = createRequire(import.meta.url);
+const { version: clientVersion } = require('./package.json');
+const POSTMARK_API_BASE = 'https://api.postmarkapp.com';
+const REQUEST_TIMEOUT_MS = 60_000;
 
 const serverToken = process.env.POSTMARK_SERVER_TOKEN;
 const defaultSender = process.env.DEFAULT_SENDER_EMAIL;
 const defaultMessageStream = process.env.DEFAULT_MESSAGE_STREAM;
+
+/**
+ * Minimal hardened HTTP client for the Postmark REST API over native fetch.
+ * Stamps client identity + correlation headers, enforces a request timeout,
+ * and maps non-2xx responses to Error objects that surface Postmark's
+ * Message / ErrorCode. Returns parsed JSON (or null for empty 2xx bodies).
+ */
+async function postmarkRequest(path, options = {}) {
+  const url = path.startsWith('http') ? path : `${POSTMARK_API_BASE}${path}`;
+  const headers = {
+    Accept: 'application/json',
+    'X-Postmark-Server-Token': serverToken,
+    'X-Postmark-Client': 'postmark-mcp',
+    'X-Postmark-Client-Version': clientVersion,
+    'X-Postmark-Correlation-Id': randomUUID(),
+    ...options.headers,
+  };
+  if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(url, { ...options, headers, signal: controller.signal });
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(`Postmark request timed out after ${REQUEST_TIMEOUT_MS/1000}s: ${path}`);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+  const text = await res.text();
+  if (!res.ok) {
+    let message = res.statusText, code;
+    try { const d = JSON.parse(text); if (d.Message) message = d.Message; if (d.ErrorCode != null) code = d.ErrorCode; } catch {}
+    throw new Error(`Postmark API ${res.status}${code != null ? ` (ErrorCode ${code})` : ''}: ${message}`);
+  }
+  return text ? JSON.parse(text) : null;
+}
+
+/** Build a query string from a params object, skipping undefined/null/empty values. */
+function qs(params) {
+  const q = Object.entries(params).filter(([, v]) => v !== undefined && v !== null && v !== '').map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+  return q ? `?${q}` : '';
+}
 
 // Initialize Postmark client and MCP server
 async function initializeServices() {
@@ -38,17 +87,15 @@ async function initializeServices() {
     console.error('Default sender: ', defaultSender);
     console.error('Message stream: ', defaultMessageStream);
 
-    const client = new postmark.ServerClient(serverToken);
-
-    // Verify Postmark client by making a test API call
-    await client.getServer();
+    // Verify connectivity + token by making a test API call
+    await postmarkRequest('/server');
 
     const mcpServer = new McpServer({
       name: "postmark-mcp",
-      version: "1.0.0"
+      version: clientVersion
     });
 
-    return { postmarkClient: client, mcpServer };
+    return { mcpServer };
   } catch (error) {
     if (error.code || error.message) {
       throw new Error(`Initialization failed: ${error.code ? `${error.code} - ` : ''}${error.message}`);
@@ -61,9 +108,9 @@ async function initializeServices() {
 // Start the server
 async function main() {
   try {
-    const { postmarkClient, mcpServer: server } = await initializeServices();
+    const { mcpServer: server } = await initializeServices();
 
-    registerTools(server, postmarkClient);
+    registerTools(server);
 
     console.error('Connecting to MCP transport..');
     const transport = new StdioServerTransport();
@@ -271,7 +318,7 @@ const fmtStatResponse = (stat, d) => {
 };
 
 // Tool registration
-function registerTools(server, postmarkClient) {
+function registerTools(server) {
   // ─────────────── Email ───────────────
 
   server.tool(
@@ -299,7 +346,10 @@ function registerTools(server, postmarkClient) {
       if (tag) emailData.Tag = tag;
 
       console.error('Sending email..', { to, subject });
-      const result = await postmarkClient.sendEmail(emailData);
+      const result = await postmarkRequest('/email', { method: 'POST', body: JSON.stringify(emailData) });
+      if (result.ErrorCode !== 0) {
+        throw new Error(`Postmark returned ErrorCode ${result.ErrorCode}: ${result.Message}`);
+      }
       console.error('Email sent successfully: ', result.MessageID);
 
       return {
@@ -344,7 +394,10 @@ function registerTools(server, postmarkClient) {
       if (tag) emailData.Tag = tag;
 
       console.error('Sending template email..', { to, templateId: templateId || templateAlias });
-      const result = await postmarkClient.sendEmailWithTemplate(emailData);
+      const result = await postmarkRequest('/email/withTemplate', { method: 'POST', body: JSON.stringify(emailData) });
+      if (result.ErrorCode !== 0) {
+        throw new Error(`Postmark returned ErrorCode ${result.ErrorCode}: ${result.Message}`);
+      }
       console.error('Template email sent successfully: ', result.MessageID);
 
       return {
@@ -422,7 +475,7 @@ function registerTools(server, postmarkClient) {
       });
 
       console.error('Sending batch..', { count: payload.length });
-      const results = await postmarkClient.sendEmailBatch(payload);
+      const results = await postmarkRequest('/email/batch', { method: 'POST', body: JSON.stringify(payload) });
       const failures = results.filter(r => r.ErrorCode !== 0).length;
       console.error(`Batch sent: ${results.length - failures}/${results.length} succeeded`);
 
@@ -475,7 +528,7 @@ function registerTools(server, postmarkClient) {
       });
 
       console.error('Sending template batch..', { count: payload.length, template: templateId || templateAlias });
-      const results = await postmarkClient.sendEmailBatchWithTemplates(payload);
+      const results = await postmarkRequest('/email/batchWithTemplates', { method: 'POST', body: JSON.stringify({ Messages: payload }) });
       const failures = results.filter(r => r.ErrorCode !== 0).length;
       console.error(`Template batch sent: ${results.length - failures}/${results.length} succeeded`);
 
@@ -490,7 +543,7 @@ function registerTools(server, postmarkClient) {
     {},
     async () => {
       console.error('Fetching templates..');
-      const result = await postmarkClient.getTemplates();
+      const result = await postmarkRequest(`/templates${qs({ count: 100, offset: 0 })}`);
       console.error(`Found ${result.Templates.length} templates`);
 
       const templateList = result.Templates.map(t => {
@@ -521,7 +574,7 @@ function registerTools(server, postmarkClient) {
     },
     async ({ templateIdOrAlias }) => {
       console.error('Fetching template..', { templateIdOrAlias });
-      const result = await postmarkClient.getTemplate(templateIdOrAlias);
+      const result = await postmarkRequest(`/templates/${encodeURIComponent(templateIdOrAlias)}`);
       console.error('Template retrieved');
 
       return {
@@ -577,7 +630,7 @@ function registerTools(server, postmarkClient) {
       if (layoutTemplate) options.LayoutTemplate = layoutTemplate;
 
       console.error('Creating template..', { name });
-      const result = await postmarkClient.createTemplate(options);
+      const result = await postmarkRequest('/templates', { method: 'POST', body: JSON.stringify(options) });
       console.error('Template created: ', result.TemplateId);
 
       return {
@@ -623,7 +676,7 @@ function registerTools(server, postmarkClient) {
       }
 
       console.error('Editing template..', { templateIdOrAlias });
-      const result = await postmarkClient.editTemplate(templateIdOrAlias, options);
+      const result = await postmarkRequest(`/templates/${encodeURIComponent(templateIdOrAlias)}`, { method: 'PUT', body: JSON.stringify(options) });
       console.error('Template updated: ', result.TemplateId);
 
       return {
@@ -647,7 +700,7 @@ function registerTools(server, postmarkClient) {
     },
     async ({ templateIdOrAlias }) => {
       console.error('Deleting template..', { templateIdOrAlias });
-      await postmarkClient.deleteTemplate(templateIdOrAlias);
+      await postmarkRequest(`/templates/${encodeURIComponent(templateIdOrAlias)}`, { method: 'DELETE' });
       console.error('Template deleted');
 
       return {
@@ -683,7 +736,7 @@ function registerTools(server, postmarkClient) {
       if (layoutTemplate) options.LayoutTemplate = layoutTemplate;
 
       console.error('Validating template..');
-      const result = await postmarkClient.validateTemplate(options);
+      const result = await postmarkRequest('/templates/validate', { method: 'POST', body: JSON.stringify(options) });
       console.error('Template validation complete');
 
       const sections = [];
@@ -743,7 +796,7 @@ function registerTools(server, postmarkClient) {
       filter.offset = offset || 0;
 
       console.error('Searching outbound messages..', filter);
-      const result = await postmarkClient.getOutboundMessages(filter);
+      const result = await postmarkRequest(`/messages/outbound${qs(filter)}`);
       console.error(`Found ${result.TotalCount} messages`);
 
       if (result.Messages.length === 0) {
@@ -770,7 +823,7 @@ function registerTools(server, postmarkClient) {
     },
     async ({ messageId }) => {
       console.error('Fetching message details..', { messageId });
-      const result = await postmarkClient.getOutboundMessageDetails(messageId);
+      const result = await postmarkRequest(`/messages/outbound/${encodeURIComponent(messageId)}/details`);
       console.error('Message details retrieved');
 
       const events = (result.MessageEvents || []).map(e =>
@@ -820,17 +873,17 @@ function registerTools(server, postmarkClient) {
       // single 404 (e.g., bad messageId) doesn't sink the whole diagnosis.
       const [messages, suppressions, bounces] = await Promise.all([
         messageId
-          ? postmarkClient.getOutboundMessageDetails(messageId)
+          ? postmarkRequest(`/messages/outbound/${encodeURIComponent(messageId)}/details`)
               .then(r => [r]).catch(() => [])
-          : postmarkClient.getOutboundMessages({
+          : postmarkRequest(`/messages/outbound${qs({
               recipient,
               fromdate: windowFrom,
               todate: windowTo,
               count: 5,
-            }).then(r => r.Messages || []).catch(() => []),
-        postmarkClient.getSuppressions(stream, { EmailAddress: recipient })
+            })}`).then(r => r.Messages || []).catch(() => []),
+        postmarkRequest(`/message-streams/${encodeURIComponent(stream)}/suppressions/dump${qs({ EmailAddress: recipient })}`)
           .then(r => r.Suppressions || []).catch(() => []),
-        postmarkClient.getBounces({ emailFilter: recipient, count: 10 })
+        postmarkRequest(`/bounces${qs({ emailFilter: recipient, count: 10 })}`)
           .then(r => r.Bounces || []).catch(() => []),
       ]);
 
@@ -839,7 +892,7 @@ function registerTools(server, postmarkClient) {
       if (messages.length > 0) {
         latest = messages[0].MessageEvents
           ? messages[0]
-          : await postmarkClient.getOutboundMessageDetails(messages[0].MessageID).catch(() => messages[0]);
+          : await postmarkRequest(`/messages/outbound/${encodeURIComponent(messages[0].MessageID)}/details`).catch(() => messages[0]);
       }
 
       const lines = [`Delivery Diagnosis: ${recipient}`, '─'.repeat(48), ''];
@@ -958,7 +1011,7 @@ function registerTools(server, postmarkClient) {
       filter.offset = offset || 0;
 
       console.error('Searching bounces..', filter);
-      const result = await postmarkClient.getBounces(filter);
+      const result = await postmarkRequest(`/bounces${qs(filter)}`);
       console.error(`Found ${result.TotalCount} bounces`);
 
       if (result.Bounces.length === 0) {
@@ -985,7 +1038,7 @@ function registerTools(server, postmarkClient) {
     },
     async ({ bounceId }) => {
       console.error('Fetching bounce dump..', { bounceId });
-      const result = await postmarkClient.getBounceDump(bounceId);
+      const result = await postmarkRequest(`/bounces/${encodeURIComponent(bounceId)}/dump`);
       console.error('Bounce dump retrieved');
 
       return {
@@ -1006,7 +1059,7 @@ function registerTools(server, postmarkClient) {
     },
     async ({ bounceId }) => {
       console.error('Activating bounce..', { bounceId });
-      const result = await postmarkClient.activateBounce(bounceId);
+      const result = await postmarkRequest(`/bounces/${encodeURIComponent(bounceId)}/activate`, { method: 'PUT' });
       console.error('Bounce activated');
 
       return {
@@ -1043,7 +1096,7 @@ function registerTools(server, postmarkClient) {
       if (toDate) filter.todate = toDate;
 
       console.error('Fetching suppressions..', { stream, filter });
-      const result = await postmarkClient.getSuppressions(stream, filter);
+      const result = await postmarkRequest(`/message-streams/${encodeURIComponent(stream)}/suppressions/dump${qs(filter)}`);
       console.error(`Found ${result.Suppressions.length} suppressions`);
 
       if (result.Suppressions.length === 0) {
@@ -1076,7 +1129,7 @@ function registerTools(server, postmarkClient) {
       };
 
       console.error('Creating suppressions..', { count: emailAddresses.length, stream });
-      const result = await postmarkClient.createSuppressions(stream, options);
+      const result = await postmarkRequest(`/message-streams/${encodeURIComponent(stream)}/suppressions`, { method: 'POST', body: JSON.stringify(options) });
       console.error('Suppressions created');
 
       const list = result.Suppressions.map(s =>
@@ -1105,7 +1158,7 @@ function registerTools(server, postmarkClient) {
       };
 
       console.error('Deleting suppressions..', { count: emailAddresses.length, stream });
-      const result = await postmarkClient.deleteSuppressions(stream, options);
+      const result = await postmarkRequest(`/message-streams/${encodeURIComponent(stream)}/suppressions/delete`, { method: 'POST', body: JSON.stringify(options) });
       console.error('Suppressions deleted');
 
       const list = result.Suppressions.map(s =>
@@ -1146,24 +1199,24 @@ function registerTools(server, postmarkClient) {
       const requested = stat || "summary";
       console.error('Fetching stats..', { stat: requested, filter });
 
-      const fetchers = {
-        summary:        () => postmarkClient.getOutboundOverview(filter),
-        overview:       () => postmarkClient.getOutboundOverview(filter),
-        sent:           () => postmarkClient.getSentCounts(filter),
-        bounces:        () => postmarkClient.getBounceCounts(filter),
-        spam:           () => postmarkClient.getSpamComplaintsCounts(filter),
-        tracked:        () => postmarkClient.getTrackedEmailCounts(filter),
-        opens:          () => postmarkClient.getEmailOpenCounts(filter),
-        openPlatforms:  () => postmarkClient.getEmailOpenPlatformUsage(filter),
-        openClients:    () => postmarkClient.getEmailOpenClientUsage(filter),
-        openReadTimes:  () => postmarkClient.getEmailOpenReadTimes(filter),
-        clicks:         () => postmarkClient.getClickCounts(filter),
-        clickBrowsers:  () => postmarkClient.getClickBrowserUsage(filter),
-        clickPlatforms: () => postmarkClient.getClickPlatformUsage(filter),
-        clickLocation:  () => postmarkClient.getClickLocation(filter),
+      const statPaths = {
+        summary:        '/stats/outbound',
+        overview:       '/stats/outbound',
+        sent:           '/stats/outbound/sends',
+        bounces:        '/stats/outbound/bounces',
+        spam:           '/stats/outbound/spam',
+        tracked:        '/stats/outbound/tracked',
+        opens:          '/stats/outbound/opens',
+        openPlatforms:  '/stats/outbound/opens/platforms',
+        openClients:    '/stats/outbound/opens/emailClients',
+        openReadTimes:  '/stats/outbound/opens/readTimes',
+        clicks:         '/stats/outbound/clicks',
+        clickBrowsers:  '/stats/outbound/clicks/browserFamilies',
+        clickPlatforms: '/stats/outbound/clicks/platforms',
+        clickLocation:  '/stats/outbound/clicks/location',
       };
 
-      const data = await fetchers[requested]();
+      const data = await postmarkRequest(`${statPaths[requested]}${qs(filter)}`);
       console.error('Stats retrieved');
 
       const text = requested === "summary"
@@ -1179,7 +1232,7 @@ function registerTools(server, postmarkClient) {
     {},
     async () => {
       console.error('Fetching server info..');
-      const result = await postmarkClient.getServer();
+      const result = await postmarkRequest('/server');
       console.error('Server info retrieved');
 
       return {
@@ -1215,10 +1268,10 @@ function registerTools(server, postmarkClient) {
     },
     async ({ messageStream }) => {
       const filter = {};
-      if (messageStream) filter.MessageStream = messageStream;
+      if (messageStream) filter.messagestream = messageStream;
 
       console.error('Fetching webhooks..', filter);
-      const result = await postmarkClient.getWebhooks(filter);
+      const result = await postmarkRequest(`/webhooks${qs(filter)}`);
       console.error(`Found ${result.Webhooks.length} webhooks`);
 
       if (result.Webhooks.length === 0) {
@@ -1280,7 +1333,7 @@ function registerTools(server, postmarkClient) {
       if (messageStream) options.MessageStream = messageStream;
 
       console.error('Creating webhook..', { url });
-      const result = await postmarkClient.createWebhook(options);
+      const result = await postmarkRequest('/webhooks', { method: 'POST', body: JSON.stringify(options) });
       console.error('Webhook created: ', result.ID);
 
       const triggers = [];
@@ -1311,7 +1364,7 @@ function registerTools(server, postmarkClient) {
     },
     async ({ webhookId }) => {
       console.error('Deleting webhook..', { webhookId });
-      await postmarkClient.deleteWebhook(webhookId);
+      await postmarkRequest(`/webhooks/${encodeURIComponent(webhookId)}`, { method: 'DELETE' });
       console.error('Webhook deleted');
 
       return {

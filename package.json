@@ -34,7 +34,6 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "dotenv": "^16.4.5",
-    "postmark": "^4.0.5",
     "zod": "^3.23.8"
   },
   "publishConfig": {

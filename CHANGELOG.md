@@ -31,7 +31,7 @@ This release expands the MCP tool surface from 4 tools to 24, organized into eig
 ### Changed
 
 - **`getDeliveryStats` default summary output reformatted.** Now includes bounce rate, spam rate, and tracked-of-sent percentage in addition to the v1 sent/open/click rates. All v1 fields are still present, just rendered with thousands separators and aligned columns.
-- **All tools now use the official `postmark` SDK exclusively.** Previously `getDeliveryStats` bypassed the SDK with raw `fetch` against the REST API. The SDK handles auth, retries, and error mapping consistently.
+- **All tools now talk to the Postmark REST API through a single raw-`fetch` client (`postmarkRequest`).** Previously the server used the official `postmark` SDK (and `getDeliveryStats` mixed in its own raw `fetch`). Transport is now unified on one hardened helper over native `fetch` that handles auth headers, a request timeout, and consistent error mapping (surfacing Postmark's `Message` / `ErrorCode`).
 
 ### Fixed
 
@@ -40,7 +40,7 @@ This release expands the MCP tool surface from 4 tools to 24, organized into eig
 
 ### Removed
 
-- **`node-fetch` dependency.** No longer needed; the SDK handles all HTTP.
+- **`postmark` and `node-fetch` dependencies.** The server now talks to the Postmark API through its own minimal HTTP client (`postmarkRequest`) over native `fetch` (Node 20+), which also stamps `X-Postmark-Client` / version / correlation-id headers so MCP-driven traffic is identifiable. Both runtime HTTP dependencies are dropped.
 
 ## [1.0.0] - Initial release
 
