@@ -1,6 +1,6 @@
 {
   "name": "@activecampaign/postmark-mcp",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Official Postmark MCP server for sending emails via Claude and AI assistants",
   "keywords": ["postmark", "activecampaign", "email", "mcp", "model-context-protocol", "claude", "cursor", "ai"],
   "author": "Jabal Torres",
@@ -16,21 +16,24 @@
   "main": "index.js",
   "type": "module",
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=20.0.0"
   },
   "files": [
     "index.js",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md",
+    "smoke-test.example.mjs",
+    "smoke-test-mutating.example.mjs"
   ],
   "scripts": {
     "start": "node index.js",
-    "inspector": "npx @modelcontextprotocol/inspector index.js"
+    "inspector": "npx @modelcontextprotocol/inspector index.js",
+    "smoke": "node smoke-test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.1",
     "dotenv": "^16.4.5",
-    "node-fetch": "^3.3.2",
     "zod": "^3.23.8"
   },
   "publishConfig": {
