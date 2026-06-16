@@ -11,7 +11,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { createRequire } from 'module';
-import { appendFileSync } from 'fs';
+import { createLogger } from './lib/log.js';
 
 const require = createRequire(import.meta.url);
 const { version: clientVersion } = require('./package.json');
@@ -108,8 +108,11 @@ async function initializeServices() {
     console.error('Message stream: ', defaultMessageStream);
     if (agentLabel) console.error('Agent label: ', agentLabel);
 
-    // Verify connectivity + token by making a test API call
-    await postmarkRequest('/server');
+    // Verify connectivity + token by making a test API call.
+    // Set POSTMARK_SKIP_VERIFY=true to bypass this check (e.g. in offline tests).
+    if (process.env.POSTMARK_SKIP_VERIFY !== 'true') {
+      await postmarkRequest('/server');
+    }
 
     const mcpServer = new McpServer({
       name: "postmark-mcp",
@@ -351,90 +354,7 @@ const fmtStatResponse = (stat, d) => {
 
 // ───── Structured logging ──────────────────────────────────────────────────
 
-// Fields whose values are always replaced — match server tokens, passwords, etc.
-const REDACT_PATTERN = /password|secret|token|apikey|api_key/i;
-
-// Fields containing body/HTML content — truncated to a byte-count marker.
-const CONTENT_FIELDS = /htmlBody|textBody/i;
-
-// Any string over this length is truncated even if not a known content field.
-const MAX_STRING_LEN = 300;
-
-// Simple email detector — used to apply masking to email-like strings.
-const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
-
-/**
- * Masks an email address, keeping the first and last chars of the mailbox
- * and replacing the middle with asterisks. Domain is left in full.
- * Examples:
- *   user@example.com  → u**r@example.com
- *   ab@example.com    → a*b@example.com
- *   a@example.com     → a@example.com   (single char, nothing to mask)
- *
- * When LOG_EMAIL_FULL=true the original value is returned unchanged.
- */
-function maskEmail(email) {
-  if (logEmailFull) return email;
-  const at = email.lastIndexOf('@');
-  if (at <= 0) return email;
-  const mailbox = email.slice(0, at);
-  const domain  = email.slice(at + 1);
-  if (mailbox.length <= 1) return email;
-  const stars  = '*'.repeat(Math.max(1, mailbox.length - 2));
-  const masked = mailbox[0] + stars + mailbox[mailbox.length - 1];
-  return `${masked}@${domain}`;
-}
-
-function sanitizeValue(key, value) {
-  if (REDACT_PATTERN.test(key)) return '[redacted]';
-  if (typeof value === 'string') {
-    if (CONTENT_FIELDS.test(key)) return `[${value.length}ch]`;
-    if (value.length > MAX_STRING_LEN) return `[truncated ${value.length}ch]`;
-    if (EMAIL_RE.test(value)) return maskEmail(value);
-    return value;
-  }
-  if (Array.isArray(value)) {
-    if (value.length === 0) return [];
-    // Message/recipient arrays — surface count + addressees, drop content
-    if (value[0] && typeof value[0] === 'object') {
-      const addrs = value
-        .map(m => m.to || m.email || m.EmailAddress)
-        .filter(Boolean)
-        .map(a => maskEmail(a));
-      return addrs.length
-        ? { _count: value.length, _recipients: addrs.slice(0, 20) }
-        : { _count: value.length };
-    }
-    // Primitive arrays (e.g. array of email strings)
-    const items = value.length <= 20 ? value : [...value.slice(0, 20), `…+${value.length - 20} more`];
-    return items.map(item => (typeof item === 'string' && EMAIL_RE.test(item)) ? maskEmail(item) : item);
-  }
-  // Arbitrary data objects (templateModel etc.) — show key names, not values
-  if (value && typeof value === 'object') return { _keys: Object.keys(value) };
-  return value;
-}
-
-function sanitizeArgs(args) {
-  if (!args || typeof args !== 'object') return {};
-  return Object.fromEntries(
-    Object.entries(args).map(([k, v]) => [k, sanitizeValue(k, v)])
-  );
-}
-
-function writeLog(entry) {
-  const line = JSON.stringify(entry);
-  process.stderr.write(line + '\n');
-  if (logFile) {
-    try {
-      appendFileSync(logFile, line + '\n');
-    } catch (e) {
-      process.stderr.write(JSON.stringify({
-        timestamp: new Date().toISOString(), level: 'warn',
-        message: `LOG_FILE write failed: ${e.message}`
-      }) + '\n');
-    }
-  }
-}
+const { maskEmail, sanitizeArgs, writeLog } = createLogger({ emailFull: logEmailFull, logFile });
 
 // Tool registration
 function registerTools(server) {

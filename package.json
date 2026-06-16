@@ -20,6 +20,7 @@
   },
   "files": [
     "index.js",
+    "lib/",
     "README.md",
     "LICENSE",
     "CHANGELOG.md",
@@ -28,6 +29,8 @@
   ],
   "scripts": {
     "start": "node index.js",
+    "test": "node --test test-unit.mjs",
+    "test:offline": "node --test test-offline.mjs",
     "inspector": "npx @modelcontextprotocol/inspector index.js",
     "smoke": "node smoke-test.mjs"
   },
