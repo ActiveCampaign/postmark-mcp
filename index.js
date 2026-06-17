@@ -43,7 +43,7 @@ const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true,  idempotentHin
 
 /**
  * Minimal hardened HTTP client for the Postmark REST API over native fetch.
- * Stamps client identity + correlation headers, enforces a request timeout,
+ * Stamps client identity headers, enforces a request timeout,
  * and maps non-2xx responses to Error objects that surface Postmark's
  * Message / ErrorCode. Returns parsed JSON (or null for empty 2xx bodies).
  */
@@ -438,7 +438,6 @@ function registerTools(server) {
       if (replyTo) emailData.ReplyTo = replyTo;
       if (tag) emailData.Tag = tag;
 
-      console.error('Sending email..', { to, subject });
       const result = await postmarkRequest('/email', { method: 'POST', body: JSON.stringify(emailData) });
       if (result.ErrorCode !== 0) {
         throw new Error(`Postmark returned ErrorCode ${result.ErrorCode}: ${result.Message}`);

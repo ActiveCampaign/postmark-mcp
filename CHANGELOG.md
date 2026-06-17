@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Structured JSON logging to stderr.** Every tool invocation emits a log line with `{ timestamp, tool, clientName, clientVersion, sanitizedArgs, status, durationMs }`. Optional `LOG_FILE` env var additionally appends logs to a file for persistence and support escalation.
-- **Email address masking in logs.** PII-safe by default — the mailbox is partially masked (first and last character retained, middle replaced with `***`), domain logged in full. Set `LOG_EMAIL_FULL=true` to disable masking. Implemented in `lib/log.js`, which also sanitizes body content and API keys from logged arguments.
+- **Email address masking in logs.** PII-safe by default — the mailbox is partially masked (first and last characters retained, middle replaced with length-proportional asterisks — e.g. `alice@example.com` → `a***e@example.com`), domain logged in full. Set `LOG_EMAIL_FULL=true` to disable masking. Implemented in `lib/log.js`, which also sanitizes body content and API keys from logged arguments.
 - **MCP client identity capture.** The `initialize` handshake captures the connecting client's name and version from the MCP protocol and attaches them to every log entry and outbound request header (`X-Postmark-MCP-Client: <name>/<version>`).
 - **`AGENT_LABEL` env var and `X-Agent-Label` request header.** Allows operators to tag their MCP server instance with a label that is sent on every Postmark API request, enabling traffic attribution in server logs or API usage reports.
 - **MCP tool annotations.** All 24 tools are annotated with `readOnlyHint`, `destructiveHint`, and `idempotentHint` so MCP clients can display risk indicators and gate destructive actions appropriately.
@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`X-Postmark-Client` correlation-id header replaced.** The `v2.0.0` request header `X-Postmark-Client: <version> / <uuid>` (per-request correlation UUID) has been replaced by two purpose-specific headers: `X-Postmark-MCP-Client: <name>/<version>` (MCP client identity from the `initialize` handshake) and `X-Agent-Label: <value>` (operator-supplied instance tag via `AGENT_LABEL`). If you built tooling to parse the old `X-Postmark-Client` header format, update accordingly.
 - **`createWebhook` now requires HTTPS.** The `url` input is validated to start with `https://`; HTTP webhook URLs are rejected at the Zod schema level before any API call is made.
 - **`listTemplates` response includes a truncation notice** when exactly 100 templates are returned, since the Postmark API caps this endpoint at 100 results with no pagination.
 - **`searchBounces` and `searchOutboundMessages` document the 10,000 pagination cap.** The `offset` field description now notes that `count + offset` cannot exceed 10,000, matching Postmark API behavior.
@@ -35,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Logging extracted to `lib/log.js`.** A `createLogger` factory is exported, making the logging utilities independently testable and reusable.
 - **Dependencies pinned to exact versions** (`@modelcontextprotocol/sdk@1.29.0`, `dotenv@16.6.1`, `zod@3.25.76`) to reduce supply chain risk.
 - **`package-lock.json` is now committed.** Removed from `.gitignore` so `npm ci` installs a reproducible, audited dependency tree.
+- **`npm run smoke` and `npm run smoke:mutating` scripts.** `smoke:mutating` is a new script for the mutating harness. Both now include a `pre` hook that detects the missing local file and prints the exact `cp` command to run rather than letting Node throw a cryptic "module not found" error.
+
+### Fixed
+
+- **`sendEmail` leaked unmasked recipient address to stderr.** A stray `console.error(to, subject)` inside the handler fired before the structured logging wrapper ran, bypassing all sanitization and masking. Removed.
+- **`cc` and `bcc` comma-separated addresses were not masked.** When multiple addresses were supplied as a comma-separated string (e.g. `"alice@example.com, bob@example.com"`), the value did not match the single-address regex and was logged in full. The sanitizer now splits, masks each address individually, and rejoins.
 
 ## [2.0.0] - 2026-06-12
 

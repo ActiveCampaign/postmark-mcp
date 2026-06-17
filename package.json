@@ -42,7 +42,10 @@
     "test:offline": "node --test test-offline.mjs",
     "test:e2e": "node --test test-e2e.mjs",
     "inspector": "npx @modelcontextprotocol/inspector index.js",
-    "smoke": "node smoke-test.mjs"
+    "presmoke": "node --input-type=module --eval \"import{existsSync}from'fs';if(!existsSync('./smoke-test.mjs')){console.error('\\nsmoke-test.mjs not found.\\nCopy the example file and add your verified sender address:\\n\\n  cp smoke-test.example.mjs smoke-test.mjs\\n\\nThen edit smoke-test.mjs and set FROM_EMAIL to a verified Postmark sender.\\n');process.exit(1)}\"",
+    "smoke": "node smoke-test.mjs",
+    "presmoke:mutating": "node --input-type=module --eval \"import{existsSync}from'fs';if(!existsSync('./smoke-test-mutating.mjs')){console.error('\\nsmoke-test-mutating.mjs not found.\\nCopy the example file and add your verified sender address:\\n\\n  cp smoke-test-mutating.example.mjs smoke-test-mutating.mjs\\n\\nThen edit smoke-test-mutating.mjs and set FROM_EMAIL to a verified Postmark sender.\\n');process.exit(1)}\"",
+    "smoke:mutating": "node smoke-test-mutating.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",
