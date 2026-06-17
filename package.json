@@ -12,7 +12,11 @@
     "cursor",
     "ai"
   ],
-  "author": "Jabal Torres",
+  "author": {
+    "name": "Postmark",
+    "email": "support@postmarkapp.com",
+    "url": "https://postmarkapp.com"
+  },
   "license": "MIT",
   "repository": {
     "type": "git",
