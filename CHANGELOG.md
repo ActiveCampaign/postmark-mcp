@@ -38,11 +38,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`package-lock.json` is now committed.** Removed from `.gitignore` so `npm ci` installs a reproducible, audited dependency tree.
 - **`npm run smoke` and `npm run smoke:mutating` scripts.** `smoke:mutating` is a new script for the mutating harness. Both now include a `pre` hook that detects the missing local file and prints the exact `cp` command to run rather than letting Node throw a cryptic "module not found" error.
 
-### Fixed
-
-- **`sendEmail` leaked unmasked recipient address to stderr.** A stray `console.error(to, subject)` inside the handler fired before the structured logging wrapper ran, bypassing all sanitization and masking. Removed.
-- **`cc` and `bcc` comma-separated addresses were not masked.** When multiple addresses were supplied as a comma-separated string (e.g. `"alice@example.com, bob@example.com"`), the value did not match the single-address regex and was logged in full. The sanitizer now splits, masks each address individually, and rejoins.
-
 ## [2.0.0] - 2026-06-12
 
 This release expands the MCP tool surface from 4 tools to 24, organized into eight categories. It includes one breaking change for users on Node 16 or 18.
