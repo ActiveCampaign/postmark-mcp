@@ -31,6 +31,7 @@
     "start": "node index.js",
     "test": "node --test test-unit.mjs",
     "test:offline": "node --test test-offline.mjs",
+    "test:e2e": "node --test test-e2e.mjs",
     "inspector": "npx @modelcontextprotocol/inspector index.js",
     "smoke": "node smoke-test.mjs"
   },

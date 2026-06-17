@@ -89,17 +89,23 @@ function qs(params) {
 async function initializeServices() {
   try {
     if (!serverToken) {
-      console.error('[ERROR] POSTMARK_SERVER_TOKEN is not set');
+      console.error('[ERROR] POSTMARK_SERVER_TOKEN is not set.');
+      console.error('  → Find your Server Token at: https://account.postmarkapp.com → your server → API Tokens tab');
+      console.error('  → Set it in your .env file or pass it via the env block in your MCP client config.');
       process.exit(1);
     }
 
     if (!defaultSender) {
-      console.error('[ERROR] DEFAULT_SENDER_EMAIL is not set');
+      console.error('[ERROR] DEFAULT_SENDER_EMAIL is not set.');
+      console.error('  → This must be an email address with a verified Sender Signature in Postmark.');
+      console.error('  → Manage sender signatures at: https://account.postmarkapp.com/signature_domains');
       process.exit(1);
     }
 
     if (!defaultMessageStream) {
-      console.error('[ERROR] DEFAULT_MESSAGE_STREAM is not set');
+      console.error('[ERROR] DEFAULT_MESSAGE_STREAM is not set.');
+      console.error('  → Set this to your outbound message stream ID (typically "outbound").');
+      console.error('  → View streams at: https://account.postmarkapp.com → your server → Message Streams');
       process.exit(1);
     }
 
@@ -121,11 +127,21 @@ async function initializeServices() {
 
     return { mcpServer };
   } catch (error) {
-    if (error.code || error.message) {
-      throw new Error(`Initialization failed: ${error.code ? `${error.code} - ` : ''}${error.message}`);
+    const msg = error.message || '';
+    if (msg.includes('401') || msg.toLowerCase().includes('unauthorized') || msg.includes('ErrorCode 10')) {
+      throw new Error(
+        `Initialization failed: Postmark rejected the server token (401 Unauthorized).\n` +
+        `  → Verify POSTMARK_SERVER_TOKEN is correct and belongs to a Server Token (not an Account Token).\n` +
+        `  → https://account.postmarkapp.com → your server → API Tokens tab`
+      );
     }
-
-    throw new Error('Initialization failed: An unexpected error occurred');
+    if (error.cause?.code === 'ENOTFOUND' || msg.includes('fetch failed') || msg.includes('ENOTFOUND')) {
+      throw new Error(
+        `Initialization failed: Could not reach the Postmark API (${msg}).\n` +
+        `  → Check your internet connection and that https://api.postmarkapp.com is reachable.`
+      );
+    }
+    throw new Error(`Initialization failed: ${error.code ? `${error.code} - ` : ''}${msg || 'An unexpected error occurred'}`);
   }
 }
 
@@ -389,19 +405,26 @@ function registerTools(server) {
 
   server.tool(
     "sendEmail",
+    "Send a single transactional email via Postmark. Accepts one recipient or an array of up to 50. The From address must be a verified sender signature. Open and link tracking are enabled automatically. Use sendBatch to send multiple distinct messages in one call.",
     {
-      to: z.string().email().describe("Recipient email address"),
+      to: z.union([
+        z.string().email(),
+        z.array(z.string().email()).min(1).max(50),
+      ]).describe("Recipient email address, or an array of up to 50 addresses"),
       subject: z.string().describe("Email subject"),
       textBody: z.string().describe("Plain text body of the email"),
       htmlBody: z.string().optional().describe("HTML body of the email (optional)"),
       from: z.string().email().optional().describe("Sender email address (optional, uses default if not provided)"),
+      cc: z.string().optional().describe("CC recipient(s), comma-separated (optional)"),
+      bcc: z.string().optional().describe("BCC recipient(s), comma-separated (optional)"),
+      replyTo: z.string().email().optional().describe("Reply-To address (optional)"),
       tag: z.string().optional().describe("Optional tag for categorization")
     },
     MUTATING,
-    async ({ to, subject, textBody, htmlBody, from, tag }) => {
+    async ({ to, subject, textBody, htmlBody, from, cc, bcc, replyTo, tag }) => {
       const emailData = {
         From: from || defaultSender,
-        To: to,
+        To: Array.isArray(to) ? to.join(', ') : to,
         Subject: subject,
         TextBody: textBody,
         MessageStream: defaultMessageStream,
@@ -410,6 +433,9 @@ function registerTools(server) {
       };
 
       if (htmlBody) emailData.HtmlBody = htmlBody;
+      if (cc) emailData.Cc = cc;
+      if (bcc) emailData.Bcc = bcc;
+      if (replyTo) emailData.ReplyTo = replyTo;
       if (tag) emailData.Tag = tag;
 
       console.error('Sending email..', { to, subject });
@@ -430,18 +456,25 @@ function registerTools(server) {
 
   server.tool(
     "sendEmailWithTemplate",
+    "Send a single email rendered from a saved Postmark template. Supply either templateId (numeric) or templateAlias (string) plus a templateModel object that provides the template variables. The From address must be a verified sender signature.",
     {
       to: z.string().email().describe("Recipient email address"),
-      templateId: z.number().optional().describe("Template ID (use either this or templateAlias)"),
-      templateAlias: z.string().optional().describe("Template alias (use either this or templateId)"),
+      templateId: z.number().optional().describe("Template ID — provide either this or templateAlias, not both"),
+      templateAlias: z.string().optional().describe("Template alias — provide either this or templateId, not both"),
       templateModel: z.object({}).passthrough().describe("Data model for template variables"),
       from: z.string().email().optional().describe("Sender email address (optional)"),
+      cc: z.string().optional().describe("CC recipient(s), comma-separated (optional)"),
+      bcc: z.string().optional().describe("BCC recipient(s), comma-separated (optional)"),
+      replyTo: z.string().email().optional().describe("Reply-To address (optional)"),
       tag: z.string().optional().describe("Optional tag for categorization")
     },
     MUTATING,
-    async ({ to, templateId, templateAlias, templateModel, from, tag }) => {
+    async ({ to, templateId, templateAlias, templateModel, from, cc, bcc, replyTo, tag }) => {
       if (!templateId && !templateAlias) {
         throw new Error("Either templateId or templateAlias must be provided");
+      }
+      if (templateId && templateAlias) {
+        throw new Error("Provide only one of templateId or templateAlias, not both");
       }
 
       const emailData = {
@@ -459,6 +492,9 @@ function registerTools(server) {
         emailData.TemplateAlias = templateAlias;
       }
 
+      if (cc) emailData.Cc = cc;
+      if (bcc) emailData.Bcc = bcc;
+      if (replyTo) emailData.ReplyTo = replyTo;
       if (tag) emailData.Tag = tag;
 
       console.error('Sending template email..', { to, templateId: templateId || templateAlias });
@@ -510,6 +546,7 @@ function registerTools(server) {
 
   server.tool(
     "sendBatch",
+    "Send up to 500 independent emails in a single synchronous Postmark API call (POST /email/batch). Each message has its own recipient, subject, and body. Returns per-message results — the overall HTTP call succeeds even when individual messages fail. Use sendEmail for a single message.",
     {
       messages: z.array(z.object({
         to: z.string().email().describe("Recipient email address"),
@@ -554,6 +591,7 @@ function registerTools(server) {
 
   server.tool(
     "sendBatchWithTemplate",
+    "Send the same Postmark template to up to 500 recipients in a single call, with per-recipient template models (POST /email/batchWithTemplates). Supply either templateId or templateAlias. Returns per-message results. Use sendEmailWithTemplate for a single recipient.",
     {
       templateId: z.number().int().optional().describe("Template ID (use either this or templateAlias)"),
       templateAlias: z.string().optional().describe("Template alias (use either this or templateId)"),
@@ -610,6 +648,7 @@ function registerTools(server) {
 
   server.tool(
     "listTemplates",
+    "List saved email templates on this Postmark server. Returns up to 100 templates with name, ID, alias, subject, type (Standard or Layout), and layout binding. Use getTemplate to retrieve a template's full HTML and text content.",
     {},
     READ_ONLY,
     async () => {
@@ -629,10 +668,11 @@ function registerTools(server) {
         return lines.join('\n');
       }).join('\n\n');
 
+      const truncated = result.Templates.length === 100;
       return {
         content: [{
           type: "text",
-          text: `Found ${result.Templates.length} templates:\n\n${templateList}`
+          text: `Found ${result.Templates.length} templates${truncated ? ' (first 100 shown — server may have more; pagination not yet supported)' : ''}:\n\n${templateList}`
         }]
       };
     }
@@ -640,6 +680,7 @@ function registerTools(server) {
 
   server.tool(
     "getTemplate",
+    "Retrieve the full content of a single Postmark template — HTML body, text body, subject, type (Standard/Layout), and layout association — by numeric ID or string alias.",
     {
       templateIdOrAlias: z.union([z.number(), z.string()]).describe("Template ID (number) or alias (string)")
     },
@@ -669,6 +710,7 @@ function registerTools(server) {
 
   server.tool(
     "createTemplate",
+    "Create a new email template on this Postmark server. Requires a name and at least one of htmlBody or textBody. Subject is required for Standard templates and must be omitted for Layout templates. Optionally bind a Standard template to an existing Layout via layoutTemplate.",
     {
       name: z.string().describe("Template name"),
       subject: z.string().optional().describe("Template subject line. Required for Standard templates; must be omitted for Layout templates (Postmark rejects Subject on Layouts)."),
@@ -722,6 +764,7 @@ function registerTools(server) {
 
   server.tool(
     "editTemplate",
+    "Update an existing Postmark template's name, subject, HTML body, text body, alias, or layout binding. At least one field must be provided. Overwrites existing content in place — this cannot be undone. Pass layoutTemplate: null to detach a Standard template from its Layout.",
     {
       templateIdOrAlias: z.union([z.number(), z.string()]).describe("Template ID (number) or alias (string)"),
       name: z.string().optional().describe("Updated template name"),
@@ -769,6 +812,7 @@ function registerTools(server) {
 
   server.tool(
     "deleteTemplate",
+    "Permanently delete a Postmark template by numeric ID or string alias. This cannot be undone. Layout templates cannot be deleted while Standard templates are still bound to them.",
     {
       templateIdOrAlias: z.union([z.number(), z.string()]).describe("Template ID (number) or alias (string) to delete")
     },
@@ -789,6 +833,7 @@ function registerTools(server) {
 
   server.tool(
     "validateTemplate",
+    "Validate Postmark Mustachio template syntax and variable references without saving anything. Checks subject, HTML body, and/or text body for errors and optionally renders them against a test data model. Use this before createTemplate or editTemplate to catch mistakes early.",
     {
       subject: z.string().optional().describe("Template subject to validate"),
       htmlBody: z.string().optional().describe("HTML body to validate"),
@@ -846,6 +891,7 @@ function registerTools(server) {
 
   server.tool(
     "searchOutboundMessages",
+    "Search outbound message history on this Postmark server. Filter by recipient, sender, subject, tag, delivery status, message stream, or date range. Returns up to 500 messages per call with basic metadata. Use getMessageDetails to retrieve the full event timeline for a specific message.",
     {
       recipient: z.string().optional().describe("Filter by recipient email address"),
       fromEmail: z.string().optional().describe("Filter by sender email address"),
@@ -856,7 +902,7 @@ function registerTools(server) {
       fromDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Start date in YYYY-MM-DD format"),
       toDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("End date in YYYY-MM-DD format"),
       count: z.number().int().min(1).max(500).optional().describe("Number of results to return (default 50, max 500)"),
-      offset: z.number().int().min(0).optional().describe("Pagination offset (default 0)")
+      offset: z.number().int().min(0).optional().describe("Pagination offset (default 0). Note: count + offset cannot exceed 10,000.")
     },
     READ_ONLY,
     async ({ recipient, fromEmail, tag, subject, status, messageStream, fromDate, toDate, count, offset }) => {
@@ -895,6 +941,7 @@ function registerTools(server) {
 
   server.tool(
     "getMessageDetails",
+    "Retrieve the full delivery details and event timeline (Delivered, Opened, Clicked, Bounced, etc.) for a single outbound message by its Postmark MessageID. Use searchOutboundMessages to find a MessageID first.",
     {
       messageId: z.string().describe("The MessageID of the email to retrieve details for")
     },
@@ -931,6 +978,7 @@ function registerTools(server) {
   // by running searches/lookups in parallel and synthesizing a recommendation.
   server.tool(
     "diagnoseDelivery",
+    "Diagnose why an email may not have reached a recipient. Runs message search, suppression lookup, and bounce history checks in parallel and returns a plain-English recommendation. Use this as a first step when a recipient reports a missing, undelivered, or bounced email.",
     {
       recipient: z.string().email().describe("The recipient address to investigate"),
       messageId: z.string().optional().describe("Optional specific MessageID to investigate. If omitted, the most recent message to recipient is used"),
@@ -1057,6 +1105,7 @@ function registerTools(server) {
 
   server.tool(
     "searchBounces",
+    "Search the Postmark bounce log. Filter by bounce type, email address, tag, message ID, message stream, and date range. Returns bounce records with type, description, timestamp, and whether each address can be reactivated. Bounce records are retained for 45 days.",
     {
       type: z.enum([
         "AddressChange", "AutoResponder", "BadEmailAddress", "Blocked",
@@ -1074,7 +1123,7 @@ function registerTools(server) {
       fromDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Start date in YYYY-MM-DD format"),
       toDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("End date in YYYY-MM-DD format"),
       count: z.number().int().min(1).max(500).optional().describe("Number of results (default 50, max 500)"),
-      offset: z.number().int().min(0).optional().describe("Pagination offset (default 0)")
+      offset: z.number().int().min(0).optional().describe("Pagination offset (default 0). Note: count + offset cannot exceed 10,000.")
     },
     READ_ONLY,
     async ({ type, inactive, emailFilter, tag, messageID, messageStream, fromDate, toDate, count, offset }) => {
@@ -1113,6 +1162,7 @@ function registerTools(server) {
 
   server.tool(
     "getBounceDump",
+    "Retrieve the raw SMTP conversation transcript for a specific bounce record. Useful for diagnosing exactly how a remote mail server rejected a message. Dumps are only retained for 30 days after the bounce.",
     {
       bounceId: z.number().int().describe("The ID of the bounce to retrieve the SMTP dump for")
     },
@@ -1135,6 +1185,7 @@ function registerTools(server) {
 
   server.tool(
     "activateBounce",
+    "Reactivate a deactivated email address so it can receive mail again on Postmark. Only works on bounces where CanActivate is true (typically HardBounce). SpamComplaint bounces cannot be reactivated. Use searchBounces or diagnoseDelivery to find the bounceId.",
     {
       bounceId: z.number().int().describe("The ID of the bounce to reactivate")
     },
@@ -1160,6 +1211,7 @@ function registerTools(server) {
 
   server.tool(
     "listSuppressions",
+    "List suppressed email addresses on a Postmark message stream. Optionally filter by suppression reason (HardBounce, SpamComplaint, ManualSuppression), origin (Recipient, Customer, Admin), email address, or date range. Suppressed addresses will not receive mail on that stream.",
     {
       messageStream: z.string().optional().describe("Message stream ID (default: DEFAULT_MESSAGE_STREAM)"),
       suppressionReason: z.enum(["HardBounce", "SpamComplaint", "ManualSuppression"]).optional().describe("Filter by suppression reason"),
@@ -1201,6 +1253,7 @@ function registerTools(server) {
 
   server.tool(
     "createSuppressions",
+    "Add up to 50 email addresses to the suppression list for a Postmark message stream. Suppressed addresses will not receive mail on that stream. Each address in the response indicates whether suppression was created or failed.",
     {
       emailAddresses: z.array(z.string().email()).min(1).max(50).describe("Email addresses to suppress (max 50)"),
       messageStream: z.string().optional().describe("Message stream ID (default: DEFAULT_MESSAGE_STREAM)")
@@ -1231,6 +1284,7 @@ function registerTools(server) {
 
   server.tool(
     "deleteSuppressions",
+    "Remove up to 50 addresses from the suppression list on a Postmark message stream, allowing them to receive mail again. SpamComplaint suppressions cannot be deleted via API. Deleting a HardBounce suppression is equivalent to reactivating that bounce.",
     {
       emailAddresses: z.array(z.string().email()).min(1).max(50).describe("Email addresses to unsuppress (max 50). Note: SpamComplaint suppressions cannot be deleted."),
       messageStream: z.string().optional().describe("Message stream ID (default: DEFAULT_MESSAGE_STREAM)")
@@ -1263,6 +1317,7 @@ function registerTools(server) {
 
   server.tool(
     "getDeliveryStats",
+    "Retrieve outbound email statistics for this Postmark server. The default 'summary' stat returns headline open rate, click rate, bounce rate, and spam rate. Specify a stat value (opens, clicks, bounces, openPlatforms, etc.) for a focused breakdown. Filterable by tag, date range, and message stream.",
     {
       stat: z.enum([
         "summary", "overview", "sent", "bounces", "spam", "tracked",
@@ -1315,6 +1370,7 @@ function registerTools(server) {
 
   server.tool(
     "getServerInfo",
+    "Retrieve this Postmark server's configuration: name, ID, color, SMTP activation status, inbound address, open and link tracking settings, and any legacy server-level webhook URLs. Use listWebhooks for webhooks managed via the Webhooks API.",
     {},
     READ_ONLY,
     async () => {
@@ -1350,6 +1406,7 @@ function registerTools(server) {
 
   server.tool(
     "listWebhooks",
+    "List all webhooks configured on this Postmark server via the Webhooks API. Optionally filter by message stream. Shows each webhook's URL, numeric ID, stream, and enabled event triggers. Use the ID with deleteWebhook to remove one.",
     {
       messageStream: z.string().optional().describe("Filter by message stream ID (e.g. 'outbound')")
     },
@@ -1389,6 +1446,7 @@ function registerTools(server) {
 
   server.tool(
     "createWebhook",
+    "Register a new Postmark webhook that will receive HTTP POST notifications when specified events occur (opens, clicks, bounces, etc.). Requires an HTTPS URL and at least one enabled trigger. Webhooks are persistent — Postmark will keep calling the URL until the webhook is deleted. Only register URLs you control.",
     {
       url: z.string().url().startsWith("https://").describe("The webhook URL to receive POST requests (must use HTTPS)"),
       messageStream: z.string().optional().describe("Message stream ID (e.g. 'outbound')"),
@@ -1455,6 +1513,7 @@ function registerTools(server) {
 
   server.tool(
     "deleteWebhook",
+    "Permanently delete a Postmark webhook by its numeric ID. Postmark will stop sending event notifications to that URL immediately. Use listWebhooks to find the ID.",
     {
       webhookId: z.number().int().describe("The ID of the webhook to delete")
     },

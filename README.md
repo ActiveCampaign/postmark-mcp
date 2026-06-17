@@ -118,22 +118,47 @@ After installing the MCP, update your configuration to set:
 - `DEFAULT_SENDER_EMAIL`
 - `DEFAULT_MESSAGE_STREAM` (default: `outbound`)
 
-## Claude and Cursor MCP Configuration Example
+## MCP Client Configuration
+
+### Using npx (recommended — no clone required)
+
+Install directly from npm without managing a local copy:
+
 ```json
 {
   "mcpServers": {
     "postmark": {
-      "command": "node",
-      "args": ["path/to/postmark-mcp/index.js"],
+      "command": "npx",
+      "args": ["-y", "@activecampaign/postmark-mcp"],
       "env": {
         "POSTMARK_SERVER_TOKEN": "your-postmark-server-token",
         "DEFAULT_SENDER_EMAIL": "your-sender-email@example.com",
-        "DEFAULT_MESSAGE_STREAM": "your-message-stream"
+        "DEFAULT_MESSAGE_STREAM": "outbound"
       }
     }
   }
 }
 ```
+
+### Using a local clone
+
+```json
+{
+  "mcpServers": {
+    "postmark": {
+      "command": "node",
+      "args": ["/absolute/path/to/postmark-mcp/index.js"],
+      "env": {
+        "POSTMARK_SERVER_TOKEN": "your-postmark-server-token",
+        "DEFAULT_SENDER_EMAIL": "your-sender-email@example.com",
+        "DEFAULT_MESSAGE_STREAM": "outbound"
+      }
+    }
+  }
+}
+```
+
+Both snippets work with **Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`), **Cursor** (`.cursor/mcp.json`), and any other MCP client that accepts the standard JSON configuration format.
 
 ## Tools
 This section provides a complete reference for the Postmark MCP server tools including example prompts and payloads. The server registers **24 tools** organized into eight categories.
@@ -177,7 +202,7 @@ This section provides a complete reference for the Postmark MCP server tools inc
 ## Email
 
 ### sendEmail
-Sends a single text (and optional HTML) email.
+Sends a transactional email to one recipient or up to 50 recipients.
 
 **Example Prompt:**
 ```
@@ -192,11 +217,14 @@ Send an email using Postmark to recipient@example.com with the subject "Meeting 
   "textBody": "Don't forget our team meeting tomorrow at 2 PM.",
   "htmlBody": "<p>Don't forget our team meeting tomorrow at 2 PM.</p>",
   "from": "sender@example.com",
+  "cc": "manager@example.com",
+  "bcc": "archive@example.com",
+  "replyTo": "support@example.com",
   "tag": "meetings"
 }
 ```
 
-`htmlBody`, `from`, and `tag` are optional. If `from` is omitted, `DEFAULT_SENDER_EMAIL` is used.
+`to` accepts a single address or an array of up to 50 addresses. `htmlBody`, `from`, `cc`, `bcc`, `replyTo`, and `tag` are optional. If `from` is omitted, `DEFAULT_SENDER_EMAIL` is used.
 
 **Response:**
 ```
@@ -309,7 +337,7 @@ Provide **either** `templateId` (number) **or** `templateAlias` (string). Top-le
 ## Templates
 
 ### listTemplates
-Lists all templates on the server.
+Lists saved templates on this server. Returns the first 100 templates; if a server has more than 100, pagination is not yet supported and the response will indicate that results are truncated.
 
 **Response:**
 ```
@@ -354,7 +382,7 @@ Updates an existing template. Requires `templateIdOrAlias` plus **at least one**
 Pass `"layoutTemplate": null` to unbind a template from its current Layout (the MCP translates this to the empty-string the Postmark API requires for clearing the association).
 
 ### deleteTemplate
-Deletes a template by ID or alias.
+Permanently deletes a template by ID or alias. Layout templates cannot be deleted while Standard templates are still bound to them — unbind via `editTemplate` first.
 
 **Payload:** `{ "templateIdOrAlias": "order-confirmation" }`
 
