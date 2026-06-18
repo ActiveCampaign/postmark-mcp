@@ -5,12 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Planned (deferred from v2.1.0)
+
+- **`getWebhook` tool** — retrieve a single webhook's full configuration by ID (`GET /webhooks/{Id}`). Currently only `listWebhooks` is available; getting a single webhook requires filtering the list by ID.
+- **`editWebhook` tool** — update an existing webhook's URL, auth, headers, or trigger settings in place (`PUT /webhooks/{Id}`). Without this, changing any property requires deleting and recreating the webhook, creating a delivery gap.
+- **`createWebhook`: `postFirstOpenOnly` parameter** — when Open trigger is enabled, fire only on the first open per message rather than every open.
+- **`createWebhook`: `bounceIncludeContent` / `spamIncludeContent` parameters** — include the full email body in Bounce and SpamComplaint webhook payloads.
+- **CI** — add automated test gating on pull requests.
+- **Async log writes** — improve log write performance under burst load when `LOG_FILE` is configured.
+
+---
+
 ## [2.1.0] - 2026-06-17
 
 ### Added
 
 - **Structured JSON logging to stderr.** Every tool invocation emits a log line with `{ timestamp, tool, clientName, clientVersion, sanitizedArgs, status, durationMs }`. Optional `LOG_FILE` env var additionally appends logs to a file for persistence and support escalation.
-- **Email address masking in logs.** PII-safe by default — the mailbox is partially masked (first and last characters retained, middle replaced with length-proportional asterisks — e.g. `alice@example.com` → `a***e@example.com`), domain logged in full. Set `LOG_EMAIL_FULL=true` to disable masking. Implemented in `lib/log.js`, which also sanitizes body content and API keys from logged arguments.
+- **Email address masking in logs.** PII-reduced by default — the mailbox is partially masked (first and last characters retained, middle replaced with length-proportional asterisks — e.g. `alice@example.com` → `a***e@example.com`), domain logged in full. This is pseudonymization, not full anonymization: the domain and first/last initials are preserved. Set `LOG_EMAIL_FULL=true` to disable masking. Implemented in `lib/log.js`, which also sanitizes body content and API keys from logged arguments.
 - **MCP client identity capture.** The `initialize` handshake captures the connecting client's name and version from the MCP protocol and attaches them to every log entry and outbound request header (`X-Postmark-MCP-Client: <name>/<version>`).
 - **`AGENT_LABEL` env var and `X-Agent-Label` request header.** Allows operators to tag their MCP server instance with a label that is sent on every Postmark API request, enabling traffic attribution in server logs or API usage reports.
 - **MCP tool annotations.** All 24 tools are annotated with `readOnlyHint`, `destructiveHint`, and `idempotentHint` so MCP clients can display risk indicators and gate destructive actions appropriately.

@@ -178,6 +178,47 @@ test('createWebhook: accepts first entry of a multi-entry WEBHOOK_URL_ALLOWLIST'
   }
 });
 
+// ─── S1 regression: allowlist bypass vectors ──────────────────────────────────
+//
+// These two URLs pass a naive startsWith() check but resolve to different hosts.
+// Both must be rejected by the fixed URL-parsed allowlist implementation.
+
+test('createWebhook: rejects userinfo bypass (S1 regression)', async () => {
+  // https://allowed.example.com@evil.test/hook
+  // startsWith("https://allowed.example.com") → true, but host === "evil.test"
+  const client = await startServer({
+    WEBHOOK_URL_ALLOWLIST: 'https://allowed.example.com',
+  });
+  try {
+    const result = await callTool(client, 'createWebhook', {
+      url: 'https://allowed.example.com@evil.test/hook',
+      openEnabled: true,
+    });
+    assert.ok(isToolError(result), `expected rejection, got: ${JSON.stringify(result)}`);
+    assert.match(errorText(result), /rejected|allowed/i);
+  } finally {
+    await client.close();
+  }
+});
+
+test('createWebhook: rejects subdomain suffix bypass (S1 regression)', async () => {
+  // https://allowed.example.com.evil.test/hook
+  // startsWith("https://allowed.example.com") → true, but host === "allowed.example.com.evil.test"
+  const client = await startServer({
+    WEBHOOK_URL_ALLOWLIST: 'https://allowed.example.com',
+  });
+  try {
+    const result = await callTool(client, 'createWebhook', {
+      url: 'https://allowed.example.com.evil.test/hook',
+      openEnabled: true,
+    });
+    assert.ok(isToolError(result), `expected rejection, got: ${JSON.stringify(result)}`);
+    assert.match(errorText(result), /rejected|allowed/i);
+  } finally {
+    await client.close();
+  }
+});
+
 // ─── Tool annotations ─────────────────────────────────────────────────────────
 //
 // Verifies that every tool has an annotations object and that the

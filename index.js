@@ -28,12 +28,36 @@ let mcpClient = null; // { name: string, version: string|null }
 const logFile = process.env.LOG_FILE || null;
 const logEmailFull = process.env.LOG_EMAIL_FULL === 'true';
 
-// Optional comma-separated list of allowed webhook URL prefixes, e.g.
+// Optional comma-separated list of allowed webhook URL origins/prefixes, e.g.
 // WEBHOOK_URL_ALLOWLIST=https://hooks.example.com,https://inbound.myapp.io
-// When set, createWebhook rejects URLs that don't start with any listed prefix.
+// When set, createWebhook rejects URLs whose parsed origin+path don't match an entry.
 const webhookAllowlist = process.env.WEBHOOK_URL_ALLOWLIST
   ? process.env.WEBHOOK_URL_ALLOWLIST.split(',').map(s => s.trim()).filter(Boolean)
   : null;
+
+if (webhookAllowlist !== null && webhookAllowlist.length === 0) {
+  console.error('[WARN] WEBHOOK_URL_ALLOWLIST is set but parsed to an empty list — all webhook URLs will be rejected. Check for stray whitespace or commas.');
+}
+
+/**
+ * Checks whether a webhook URL is permitted by the allowlist.
+ * Matches on parsed origin + pathname prefix to prevent raw-string bypasses
+ * such as userinfo injection (https://allowed.host@evil.test/) or subdomain
+ * suffix spoofing (https://allowed.host.evil.test/).
+ * Returns true when no allowlist is configured (allow-all).
+ */
+function isAllowedWebhookUrl(url, allowlist) {
+  if (!allowlist) return true;
+  let u;
+  try { u = new URL(url); } catch { return false; }
+  // Reject embedded credentials — userinfo can be used to spoof host matching.
+  if (u.username || u.password) return false;
+  return allowlist.some(entry => {
+    let a;
+    try { a = new URL(entry); } catch { return false; }
+    return u.origin === a.origin && u.pathname.startsWith(a.pathname);
+  });
+}
 
 // MCP tool annotation presets (https://modelcontextprotocol.io/docs/concepts/tools)
 // Clients use these hints to decide whether to prompt for confirmation before invoking.
@@ -48,6 +72,12 @@ const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true,  idempotentHin
  * Message / ErrorCode. Returns parsed JSON (or null for empty 2xx bodies).
  */
 async function postmarkRequest(path, options = {}) {
+  // All internal callers pass a literal path starting with '/'. The absolute-URL
+  // branch is kept for flexibility, but anything else is a programming error and
+  // would be an SSRF footgun if user-influenced input ever reached this parameter.
+  if (!path.startsWith('/') && !path.startsWith('http')) {
+    throw new Error(`postmarkRequest: path must start with '/' or 'http', got: ${path}`);
+  }
   const url = path.startsWith('http') ? path : `${POSTMARK_API_BASE}${path}`;
   const headers = {
     Accept: 'application/json',
@@ -116,7 +146,11 @@ async function initializeServices() {
 
     // Verify connectivity + token by making a test API call.
     // Set POSTMARK_SKIP_VERIFY=true to bypass this check (e.g. in offline tests).
-    if (process.env.POSTMARK_SKIP_VERIFY !== 'true') {
+    if (process.env.POSTMARK_SKIP_VERIFY === 'true') {
+      if (serverToken !== 'POSTMARK_API_TEST') {
+        console.error('[WARN] POSTMARK_SKIP_VERIFY is enabled with a real server token — startup token verification is skipped. Do not use this in production.');
+      }
+    } else {
       await postmarkRequest('/server');
     }
 
@@ -496,7 +530,7 @@ function registerTools(server) {
       if (replyTo) emailData.ReplyTo = replyTo;
       if (tag) emailData.Tag = tag;
 
-      console.error('Sending template email..', { to, templateId: templateId || templateAlias });
+      console.error('Sending template email..', { templateId: templateId || templateAlias });
       const result = await postmarkRequest('/email/withTemplate', { method: 'POST', body: JSON.stringify(emailData) });
       if (result.ErrorCode !== 0) {
         throw new Error(`Postmark returned ErrorCode ${result.ErrorCode}: ${result.Message}`);
@@ -993,7 +1027,7 @@ function registerTools(server) {
       const windowFrom = fromDate || weekAgo;
       const windowTo = toDate || today;
 
-      console.error('Diagnosing delivery..', { recipient, messageId, stream });
+      console.error('Diagnosing delivery..', { messageId, stream });
 
       // Independent lookups in parallel — each tolerant of failure so a
       // single 404 (e.g., bad messageId) doesn't sink the whole diagnosis.
@@ -1445,7 +1479,7 @@ function registerTools(server) {
 
   server.tool(
     "createWebhook",
-    "Register a new Postmark webhook that will receive HTTP POST notifications when specified events occur (opens, clicks, bounces, etc.). Requires an HTTPS URL and at least one enabled trigger. Webhooks are persistent — Postmark will keep calling the URL until the webhook is deleted. Only register URLs you control.",
+    "Register a new Postmark webhook that will receive HTTP POST notifications when specified events occur (opens, clicks, bounces, etc.). Requires an HTTPS URL and at least one enabled trigger. Webhooks are persistent — Postmark will keep calling the URL until the webhook is deleted. Only register URLs you control. To secure the receiving endpoint, whitelist Postmark's published sending IPs at the network level.",
     {
       url: z.string().url().startsWith("https://").describe("The webhook URL to receive POST requests (must use HTTPS)"),
       messageStream: z.string().optional().describe("Message stream ID (e.g. 'outbound')"),
@@ -1464,10 +1498,10 @@ function registerTools(server) {
         throw new Error("At least one trigger must be enabled (openEnabled, clickEnabled, deliveryEnabled, bounceEnabled, spamComplaintEnabled, or subscriptionChangeEnabled)");
       }
 
-      if (webhookAllowlist && !webhookAllowlist.some(prefix => url.startsWith(prefix))) {
+      if (!isAllowedWebhookUrl(url, webhookAllowlist)) {
         throw new Error(
-          `Webhook URL rejected: does not match any allowed prefix in WEBHOOK_URL_ALLOWLIST. ` +
-          `Allowed prefixes: ${webhookAllowlist.join(', ')}`
+          `Webhook URL rejected: does not match any allowed origin in WEBHOOK_URL_ALLOWLIST. ` +
+          `Allowed entries: ${webhookAllowlist ? webhookAllowlist.join(', ') : '(none)'}`
         );
       }
 

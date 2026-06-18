@@ -5,7 +5,7 @@ Send emails with Postmark using Claude and other MCP-compatible AI assistants.
 ## Features
 - Exposes a Model Context Protocol (MCP) server backed by your [Postmark account](https://account.postmarkapp.com/sign_up)
 - 24 tools spanning email sending (single + batch), templates (CRUD + validation), message search, delivery diagnostics, bounces, suppressions, stats, server info, and webhooks
-- MCP tool annotations (`readOnlyHint`, `destructiveHint`) let supporting clients auto-approve safe reads and prompt before destructive or sending operations
+- MCP tool annotations (`readOnlyHint`, `destructiveHint`) let supporting clients auto-approve safe reads and require confirmation before mutating or destructive operations
 - Simple configuration via environment variables
 - Comprehensive error handling and graceful shutdown
 - Structured JSON logging to stderr with optional log-file persistence; email addresses are partially masked by default
@@ -73,7 +73,7 @@ Edit your `.env` to contain your Postmark credentials and settings.
 |---|---|---|
 | `AGENT_LABEL` | — | A label for this instance (e.g., `prod`, `staging`). Sent as `X-Agent-Label` on every Postmark API request, useful for identifying traffic sources in logs or support tickets. |
 | `WEBHOOK_URL_ALLOWLIST` | — | Comma-separated list of HTTPS URL prefixes that `createWebhook` will accept (e.g., `https://hooks.yourapp.com,https://inbound.corp.io`). When unset, any valid HTTPS URL is accepted. |
-| `LOG_FILE` | — | Path to a file where structured JSON logs are appended in addition to stderr. The file is created if it does not exist. |
+| `LOG_FILE` | — | Path to a file where structured JSON logs are appended in addition to stderr. The file is created if it does not exist. No rotation or size cap is applied — use an external tool such as `logrotate` to manage the file in long-running deployments. |
 | `LOG_EMAIL_FULL` | `false` | Set to `true` to log email addresses without masking. By default the mailbox portion is partially masked in logs (`u**r@example.com`). |
 
 **Run the server:**
@@ -731,10 +731,12 @@ The 24 tools include several high-impact operations. Below is the breakdown by r
 | **Additive** (account-state changes) | `createTemplate`, `createSuppressions`, `createWebhook`, `activateBounce` |
 | **Read-only** | All remaining 12 tools |
 
-All tools carry MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`). MCP clients that respect annotations — including Cursor and Claude Desktop — will surface confirmation prompts for destructive and sending operations and can auto-approve safe read-only lookups.
+All tools carry MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`). MCP clients that respect annotations — including Cursor and Claude Desktop — can auto-approve safe read-only lookups (`readOnlyHint: true`) and will surface confirmation prompts for anything that isn't a read: sends, template edits, suppression changes, and webhook management. Tools that permanently delete data additionally carry `destructiveHint: true` for clients that distinguish destructive from merely mutating actions.
 
 ### Webhook URL policy
 `createWebhook` enforces HTTPS on all URLs. Once a webhook is registered, Postmark will POST event data (opens, clicks, bounces, spam complaints) to that URL on an ongoing basis until the webhook is deleted. To prevent a compromised or misdirected tool call from registering a callback you don't control, set `WEBHOOK_URL_ALLOWLIST` to the HTTPS prefixes you own. Audit registered webhooks regularly with `listWebhooks` or via the [Postmark dashboard](https://account.postmarkapp.com).
+
+To secure your webhook receiver, whitelist [Postmark's published sending IPs](https://postmarkapp.com/support/article/800-what-are-the-postmark-ip-addresses) at the network or firewall level so only Postmark can POST to your endpoint.
 
 ### Prompt injection risk
 Because this MCP server can send email and register webhooks, it is a potential target for [prompt injection](https://owasp.org/www-project-top-10-for-large-language-model-applications/) — where malicious content in an email, template, or repository tricks the AI into invoking a tool with unintended arguments. The mitigations above (dedicated token, tool approval in your MCP client, `WEBHOOK_URL_ALLOWLIST`) reduce the blast radius if this occurs. Never configure auto-approval for sending or destructive tools in untrusted environments.
