@@ -5,6 +5,52 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Planned (deferred from v2.1.0)
+
+- **`getWebhook` tool** — retrieve a single webhook's full configuration by ID (`GET /webhooks/{Id}`). Currently only `listWebhooks` is available; getting a single webhook requires filtering the list by ID.
+- **`editWebhook` tool** — update an existing webhook's URL, auth, headers, or trigger settings in place (`PUT /webhooks/{Id}`). Without this, changing any property requires deleting and recreating the webhook, creating a delivery gap.
+- **`createWebhook`: `postFirstOpenOnly` parameter** — when Open trigger is enabled, fire only on the first open per message rather than every open.
+- **`createWebhook`: `bounceIncludeContent` / `spamIncludeContent` parameters** — include the full email body in Bounce and SpamComplaint webhook payloads.
+- **CI** — add automated test gating on pull requests.
+- **Async log writes** — improve log write performance under burst load when `LOG_FILE` is configured.
+
+---
+
+## [2.1.0] - 2026-06-17
+
+### Added
+
+- **Structured JSON logging to stderr.** Every tool invocation emits a log line with `{ timestamp, tool, clientName, clientVersion, sanitizedArgs, status, durationMs }`. Optional `LOG_FILE` env var additionally appends logs to a file for persistence and support escalation.
+- **Email address masking in logs.** PII-reduced by default — the mailbox is partially masked (first and last characters retained, middle replaced with length-proportional asterisks — e.g. `alice@example.com` → `a***e@example.com`), domain logged in full. This is pseudonymization, not full anonymization: the domain and first/last initials are preserved. Set `LOG_EMAIL_FULL=true` to disable masking. Implemented in `lib/log.js`, which also sanitizes body content and API keys from logged arguments.
+- **MCP client identity capture.** The `initialize` handshake captures the connecting client's name and version from the MCP protocol and attaches them to every log entry and outbound request header (`X-Postmark-MCP-Client: <name>/<version>`).
+- **`AGENT_LABEL` env var and `X-Agent-Label` request header.** Allows operators to tag their MCP server instance with a label that is sent on every Postmark API request, enabling traffic attribution in server logs or API usage reports.
+- **MCP tool annotations.** All 24 tools are annotated with `readOnlyHint`, `destructiveHint`, and `idempotentHint` so MCP clients can display risk indicators and gate destructive actions appropriately.
+- **Tool descriptions.** All 24 `server.tool()` registrations now include a concise description string, improving tool discovery and LLM decision-making.
+- **`sendEmail` multi-recipient support.** The `to` field now accepts either a single address string or an array of up to 50 addresses. Added optional `cc`, `bcc`, and `replyTo` fields.
+- **`sendEmailWithTemplate` improvements.** Added `cc`, `bcc`, and `replyTo` fields. Added a mutual-exclusivity guard: supplying both `templateId` and `templateAlias` now fails fast with a descriptive error rather than sending an ambiguous request.
+- **Webhook URL allowlist (`WEBHOOK_URL_ALLOWLIST`).** Set this env var to a comma-separated list of HTTPS URL prefixes; `createWebhook` will reject any URL that does not match. When unset, any valid HTTPS URL is accepted.
+- **Actionable startup error messages.** Missing or invalid configuration now produces messages that name the env var, explain the consequence, and link to the relevant Postmark documentation page.
+- **`npx`-based client configuration snippet in README.** Covers Cursor, Claude Desktop, and Windsurf — no local clone required.
+- **Automated test suite (52 tests across 3 tiers).**
+  - *Tier 1 — Unit* (`npm test`): 34 tests for `maskEmail`, `sanitizeArgs`, and `writeLog` in `lib/log.js`.
+  - *Tier 2 — Offline MCP validation* (`npm run test:offline`): 11 tests covering webhook HTTPS enforcement, allowlist behavior, and tool annotation correctness — no Postmark account required.
+  - *Tier 3 — E2E env var wiring* (`npm run test:e2e`): 7 tests verifying `LOG_FILE`, `LOG_EMAIL_FULL`, and MCP client identity capture end-to-end.
+- **`POSTMARK_SKIP_VERIFY` env var.** Bypasses the startup `/server` connectivity check; intended for test environments and offline use.
+
+### Changed
+
+- **`X-Postmark-Client` correlation-id header replaced.** The `v2.0.0` request header `X-Postmark-Client: <version> / <uuid>` (per-request correlation UUID) has been replaced by two purpose-specific headers: `X-Postmark-MCP-Client: <name>/<version>` (MCP client identity from the `initialize` handshake) and `X-Agent-Label: <value>` (operator-supplied instance tag via `AGENT_LABEL`). If you built tooling to parse the old `X-Postmark-Client` header format, update accordingly.
+- **`createWebhook` now requires HTTPS.** The `url` input is validated to start with `https://`; HTTP webhook URLs are rejected at the Zod schema level before any API call is made.
+- **`listTemplates` response includes a truncation notice** when exactly 100 templates are returned, since the Postmark API caps this endpoint at 100 results with no pagination.
+- **`searchBounces` and `searchOutboundMessages` document the 10,000 pagination cap.** The `offset` field description now notes that `count + offset` cannot exceed 10,000, matching Postmark API behavior.
+- **`deleteTemplate` documentation notes Layout template constraints.** Layout templates that are referenced by other templates cannot be deleted until dependents are unbound or reassigned.
+- **Logging extracted to `lib/log.js`.** A `createLogger` factory is exported, making the logging utilities independently testable and reusable.
+- **Dependencies pinned to exact versions** (`@modelcontextprotocol/sdk@1.29.0`, `dotenv@16.6.1`, `zod@3.25.76`) to reduce supply chain risk.
+- **`package-lock.json` is now committed.** Removed from `.gitignore` so `npm ci` installs a reproducible, audited dependency tree.
+- **`npm run smoke` and `npm run smoke:mutating` scripts.** `smoke:mutating` is a new script for the mutating harness. Both now include a `pre` hook that detects the missing local file and prints the exact `cp` command to run rather than letting Node throw a cryptic "module not found" error.
+
 ## [2.0.0] - 2026-06-12
 
 This release expands the MCP tool surface from 4 tools to 24, organized into eight categories. It includes one breaking change for users on Node 16 or 18.

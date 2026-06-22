@@ -5,9 +5,11 @@ Send emails with Postmark using Claude and other MCP-compatible AI assistants.
 ## Features
 - Exposes a Model Context Protocol (MCP) server backed by your [Postmark account](https://account.postmarkapp.com/sign_up)
 - 24 tools spanning email sending (single + batch), templates (CRUD + validation), message search, delivery diagnostics, bounces, suppressions, stats, server info, and webhooks
+- MCP tool annotations (`readOnlyHint`, `destructiveHint`) let supporting clients auto-approve safe reads and require confirmation before mutating or destructive operations
 - Simple configuration via environment variables
 - Comprehensive error handling and graceful shutdown
-- Secure logging practices (no sensitive data exposure)
+- Structured JSON logging to stderr with optional log-file persistence; email addresses are partially masked by default
+- HTTPS enforcement and optional domain allowlist for webhook registration
 - Automatic open/click tracking on every send
 
 ## Useful Docs
@@ -57,11 +59,22 @@ Edit your `.env` to contain your Postmark credentials and settings.
 
 **Important:** This is intended for local development purposes only. Secrets should never be stored in version control and `.env` type files should be added to `.gitignore`.
 
-| Variable                  | Description                                      | Required   |
-|---------------------------|--------------------------------------------------|------------|
-| POSTMARK_SERVER_TOKEN     | Your Postmark server API token                   | Yes        |
-| DEFAULT_SENDER_EMAIL      | Default sender email address                     | Yes        |
-| DEFAULT_MESSAGE_STREAM    | Postmark message stream (e.g., 'outbound')       | Yes        |
+### Required
+
+| Variable | Description |
+|---|---|
+| `POSTMARK_SERVER_TOKEN` | Your Postmark server API token |
+| `DEFAULT_SENDER_EMAIL` | Default sender email address (must be a verified sender in Postmark) |
+| `DEFAULT_MESSAGE_STREAM` | Postmark message stream (e.g., `outbound`) |
+
+### Optional
+
+| Variable | Default | Description |
+|---|---|---|
+| `AGENT_LABEL` | — | A label for this instance (e.g., `prod`, `staging`). Sent as `X-Agent-Label` on every Postmark API request, useful for identifying traffic sources in logs or support tickets. |
+| `WEBHOOK_URL_ALLOWLIST` | — | Comma-separated list of HTTPS URL prefixes that `createWebhook` will accept (e.g., `https://hooks.yourapp.com,https://inbound.corp.io`). When unset, any valid HTTPS URL is accepted. |
+| `LOG_FILE` | — | Path to a file where structured JSON logs are appended in addition to stderr. The file is created if it does not exist. No rotation or size cap is applied — use an external tool such as `logrotate` to manage the file in long-running deployments. |
+| `LOG_EMAIL_FULL` | `false` | Set to `true` to log email addresses without masking. By default the mailbox portion is partially masked in logs (`u**r@example.com`). |
 
 **Run the server:**
 
@@ -105,22 +118,47 @@ After installing the MCP, update your configuration to set:
 - `DEFAULT_SENDER_EMAIL`
 - `DEFAULT_MESSAGE_STREAM` (default: `outbound`)
 
-## Claude and Cursor MCP Configuration Example
+## MCP Client Configuration
+
+### Using npx (recommended — no clone required)
+
+Install directly from npm without managing a local copy:
+
 ```json
 {
   "mcpServers": {
     "postmark": {
-      "command": "node",
-      "args": ["path/to/postmark-mcp/index.js"],
+      "command": "npx",
+      "args": ["-y", "@activecampaign/postmark-mcp"],
       "env": {
         "POSTMARK_SERVER_TOKEN": "your-postmark-server-token",
         "DEFAULT_SENDER_EMAIL": "your-sender-email@example.com",
-        "DEFAULT_MESSAGE_STREAM": "your-message-stream"
+        "DEFAULT_MESSAGE_STREAM": "outbound"
       }
     }
   }
 }
 ```
+
+### Using a local clone
+
+```json
+{
+  "mcpServers": {
+    "postmark": {
+      "command": "node",
+      "args": ["/absolute/path/to/postmark-mcp/index.js"],
+      "env": {
+        "POSTMARK_SERVER_TOKEN": "your-postmark-server-token",
+        "DEFAULT_SENDER_EMAIL": "your-sender-email@example.com",
+        "DEFAULT_MESSAGE_STREAM": "outbound"
+      }
+    }
+  }
+}
+```
+
+Both snippets work with **Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`), **Cursor** (`.cursor/mcp.json`), and any other MCP client that accepts the standard JSON configuration format.
 
 ## Tools
 This section provides a complete reference for the Postmark MCP server tools including example prompts and payloads. The server registers **24 tools** organized into eight categories.
@@ -164,7 +202,7 @@ This section provides a complete reference for the Postmark MCP server tools inc
 ## Email
 
 ### sendEmail
-Sends a single text (and optional HTML) email.
+Sends a transactional email to one recipient or up to 50 recipients.
 
 **Example Prompt:**
 ```
@@ -179,11 +217,14 @@ Send an email using Postmark to recipient@example.com with the subject "Meeting 
   "textBody": "Don't forget our team meeting tomorrow at 2 PM.",
   "htmlBody": "<p>Don't forget our team meeting tomorrow at 2 PM.</p>",
   "from": "sender@example.com",
+  "cc": "manager@example.com",
+  "bcc": "archive@example.com",
+  "replyTo": "support@example.com",
   "tag": "meetings"
 }
 ```
 
-`htmlBody`, `from`, and `tag` are optional. If `from` is omitted, `DEFAULT_SENDER_EMAIL` is used.
+`to` accepts a single address or an array of up to 50 addresses. `htmlBody`, `from`, `cc`, `bcc`, `replyTo`, and `tag` are optional. If `from` is omitted, `DEFAULT_SENDER_EMAIL` is used.
 
 **Response:**
 ```
@@ -226,7 +267,9 @@ Template: welcome
 ```
 
 ### sendBatch
-Sends up to 500 emails in a single API call. Each message is fully independent (its own recipient, subject, body). This wraps Postmark's *synchronous* batch endpoint (`POST /email/batch`) — the call returns immediate per-message results — and synthesizes the success/failure summary. (Postmark also offers a separate *asynchronous* [bulk email API](https://postmarkapp.com/developer/api/bulk-email) at `/email/bulk` for large-volume jobs with submit-and-poll workflow, no message count cap, and a 50 MB payload limit. That's a parallel capability for different use cases — not currently wrapped by this MCP, tracked as a v2.1 follow-up.)
+Sends up to 500 emails in a single API call. Each message is fully independent — its own recipient, subject, and body. This wraps Postmark's *synchronous* batch endpoint (`POST /email/batch`), which returns immediate per-message results.
+
+> **Note:** Postmark also offers an asynchronous [bulk email API](https://postmarkapp.com/developer/api/bulk-email) (`POST /email/bulk`) for large-volume jobs with no message-count cap and a 50 MB payload limit. That endpoint uses a submit-and-poll workflow and is not currently wrapped by this MCP server.
 
 **Expected Payload:**
 ```json
@@ -294,7 +337,7 @@ Provide **either** `templateId` (number) **or** `templateAlias` (string). Top-le
 ## Templates
 
 ### listTemplates
-Lists all templates on the server.
+Lists saved templates on this server. Returns the first 100 templates; if a server has more than 100, pagination is not yet supported and the response will indicate that results are truncated.
 
 **Response:**
 ```
@@ -339,7 +382,7 @@ Updates an existing template. Requires `templateIdOrAlias` plus **at least one**
 Pass `"layoutTemplate": null` to unbind a template from its current Layout (the MCP translates this to the empty-string the Postmark API requires for clearing the association).
 
 ### deleteTemplate
-Deletes a template by ID or alias.
+Permanently deletes a template by ID or alias. Layout templates cannot be deleted while Standard templates are still bound to them — unbind via `editTemplate` first.
 
 **Payload:** `{ "templateIdOrAlias": "order-confirmation" }`
 
@@ -580,10 +623,14 @@ Lists configured webhooks. Optional `messageStream` filter.
 ### createWebhook
 Creates a webhook subscription. Requires a `url` and **at least one** trigger.
 
+**Security note:** Webhooks are persistent — once registered, Postmark will POST event data (opens, clicks, bounces, spam complaints, etc.) to the target URL for all future matching events on that server, until the webhook is deleted. Only register webhooks pointing to URLs you control. Use `WEBHOOK_URL_ALLOWLIST` to restrict accepted URLs to known prefixes.
+
+The `url` must use **HTTPS**. HTTP URLs are rejected. If `WEBHOOK_URL_ALLOWLIST` is set, the URL must also match one of the configured prefixes.
+
 **Expected Payload:**
 ```json
 {
-  "url": "https://example.com/postmark-hook",
+  "url": "https://hooks.yourapp.com/postmark",
   "messageStream": "outbound",
   "openEnabled": true,
   "clickEnabled": true,
@@ -601,15 +648,16 @@ Deletes a webhook by ID.
 
 ## Implementation Details
 ### API Request Headers
-All requests to the Postmark API that are made directly by this server include the following headers for client identification and correlation:
+All requests to the Postmark API include the following headers for client identification:
 
 | Header | Description |
-|--------|-------------|
-| `X-Postmark-Client` | Client identifier: `postmark-mcp` |
-| `X-Postmark-Client-Version` | Version of this MCP server (matches package version) |
-| `X-Postmark-Correlation-Id` | A unique ID per request (UUID v4) for correlating requests with your logs or support. The API may use this in the future; it is safe to send now. |
+|---|---|
+| `X-Postmark-Client` | Always `postmark-mcp` — identifies this server as the request origin |
+| `X-Postmark-Client-Version` | Version of this MCP server, matching the package version |
+| `X-Postmark-MCP-Client` | Name and version of the MCP host application (e.g., `claude-desktop/1.0`), captured from the MCP `initialize` handshake. Omitted if the client does not provide this information. |
+| `X-Agent-Label` | Value of the `AGENT_LABEL` environment variable. Omitted when not set. |
 
-These headers are sent on **every** request to the Postmark API. This server uses its own HTTP client (no postmark npm package) so that MCP traffic is identified as `postmark-mcp` and not as the Node.js SDK.
+This server uses its own HTTP client (no postmark npm package) so that MCP traffic is identifiable as `postmark-mcp` in Postmark logs and support tickets.
 
 ### Automatic Configuration
 All emails are automatically configured with:
@@ -626,13 +674,76 @@ The server implements comprehensive error handling:
 - Consistent error message formatting
 
 ### Logging
-- Uses appropriate log levels (`info` for normal operations, `error` for errors)
-- Excludes sensitive information from logs
-- Provides clear operation status and results
+Every tool invocation emits a structured JSON line to **stderr**. If `LOG_FILE` is set, the same line is also appended to that file.
+
+**Log entry shape:**
+```json
+{
+  "timestamp": "2026-06-16T20:34:01.123Z",
+  "tool": "sendEmail",
+  "clientName": "claude-desktop",
+  "clientVersion": "1.0",
+  "args": {
+    "to": "u**r@example.com",
+    "subject": "Meeting Reminder",
+    "textBody": "[312ch]"
+  },
+  "status": "ok",
+  "durationMs": 243
+}
+```
+
+On error, `status` is `"error"` and an `error` field contains the message.
+
+**What is and isn't logged:**
+
+| Data | Logged as |
+|---|---|
+| Email addresses | Partially masked: `u**r@example.com` (set `LOG_EMAIL_FULL=true` to disable) |
+| `htmlBody` / `textBody` | Byte count only: `[312ch]` |
+| `templateModel` and other data objects | Key names only: `{ "_keys": ["name", "plan"] }` |
+| Batch `messages` / `recipients` arrays | Count + recipient list: `{ "_count": 2, "_recipients": ["u**r@…", "a*b@…"] }` |
+| Fields matching `password`, `secret`, `token`, `apikey` | `[redacted]` |
+| Tool name, duration, MCP client identity, status | Logged in full |
+
+> Unstructured operational messages (startup, shutdown, API connectivity) continue to write to stderr as plain text alongside the JSON tool logs.
 
 ---
 
-*For more information about the Postmark API, visit [Postmark's Developer Documentation](https://postmarkapp.com/developer).* 
+## Security Considerations
+
+### Access scope
+This MCP server acts with the full permissions of the configured `POSTMARK_SERVER_TOKEN`. It exposes 24 tools — including bulk email sends, template management, webhook registration, and suppression list edits — to any MCP client that connects.
+
+Postmark has [two token types](https://postmarkapp.com/developer/api/overview#authentication): a **Server Token** (used here) and an **Account Token**. Neither supports sub-scoped permissions — a Server Token grants full access to all operations on the server it belongs to. The practical way to limit exposure is structural:
+
+- Create a **dedicated Postmark server** used exclusively for MCP traffic. A compromise is then limited to that server's data and settings rather than your entire account.
+- Configure that server with only the message streams and verified sender signatures it actually needs.
+- Rotate the token if it is ever exposed.
+
+### Tool blast radius
+The 24 tools include several high-impact operations. Below is the breakdown by risk level:
+
+| Category | Tools |
+|---|---|
+| **Destructive** (irreversible) | `editTemplate`, `deleteTemplate`, `deleteWebhook`, `deleteSuppressions` |
+| **Sending** (outbound email) | `sendEmail`, `sendEmailWithTemplate`, `sendBatch`, `sendBatchWithTemplate` |
+| **Additive** (account-state changes) | `createTemplate`, `createSuppressions`, `createWebhook`, `activateBounce` |
+| **Read-only** | All remaining 12 tools |
+
+All tools carry MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`). MCP clients that respect annotations — including Cursor and Claude Desktop — can auto-approve safe read-only lookups (`readOnlyHint: true`) and will surface confirmation prompts for anything that isn't a read: sends, template edits, suppression changes, and webhook management. Tools that permanently delete data additionally carry `destructiveHint: true` for clients that distinguish destructive from merely mutating actions.
+
+### Webhook URL policy
+`createWebhook` enforces HTTPS on all URLs. Once a webhook is registered, Postmark will POST event data (opens, clicks, bounces, spam complaints) to that URL on an ongoing basis until the webhook is deleted. To prevent a compromised or misdirected tool call from registering a callback you don't control, set `WEBHOOK_URL_ALLOWLIST` to the HTTPS prefixes you own. Audit registered webhooks regularly with `listWebhooks` or via the [Postmark dashboard](https://account.postmarkapp.com).
+
+To secure your webhook receiver, whitelist [Postmark's published sending IPs](https://postmarkapp.com/support/article/800-what-are-the-postmark-ip-addresses) at the network or firewall level so only Postmark can POST to your endpoint.
+
+### Prompt injection risk
+Because this MCP server can send email and register webhooks, it is a potential target for [prompt injection](https://owasp.org/www-project-top-10-for-large-language-model-applications/) — where malicious content in an email, template, or repository tricks the AI into invoking a tool with unintended arguments. The mitigations above (dedicated token, tool approval in your MCP client, `WEBHOOK_URL_ALLOWLIST`) reduce the blast radius if this occurs. Never configure auto-approval for sending or destructive tools in untrusted environments.
+
+---
+
+*For more information about the Postmark API, visit [Postmark's Developer Documentation](https://postmarkapp.com/developer).*
 
 ## License
 [MIT](LICENSE) © ActiveCampaign
