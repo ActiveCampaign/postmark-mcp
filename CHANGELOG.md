@@ -18,6 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.1.1] - 2026-07-13
+
+### Fixed
+
+- **`npx @activecampaign/postmark-mcp` didn't actually work.** The README already documented this as the recommended, primary way to run the server, but the package was missing the `bin` entry and executable shebang needed for `npx`/global installs to resolve a command. `index.js` now starts with `#!/usr/bin/env node` and `package.json` declares `"bin": { "postmark-mcp": "index.js" }`.
+- **README MIT license badge pointed at the wrong package.** It resolved `https://img.shields.io/npm/l/%40modelcontextprotocol%2Fsdk`, showing `@modelcontextprotocol/sdk`'s license instead of this package's. Now points at `@activecampaign/postmark-mcp`.
+
+### Changed
+
+- **`prepublishOnly` script (`npm test`).** Runs the unit test suite automatically before `npm publish`, so a broken build can't be published by accident. Maintainer-facing only; no effect on consumers.
+
+---
+
 ## [2.1.0] - 2026-06-17
 
 ### Added
