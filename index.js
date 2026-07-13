@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * @file Postmark MCP Server
  * @description Official Postmark MCP server for sending emails via Claude and AI assistants
