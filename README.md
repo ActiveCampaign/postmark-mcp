@@ -11,6 +11,7 @@ Send emails with Postmark using Claude and other MCP-compatible AI assistants.
 - Structured JSON logging to stderr with optional log-file persistence; email addresses are partially masked by default
 - HTTPS enforcement and optional domain allowlist for webhook registration
 - Automatic open/click tracking on every send
+- File attachments on every sending tool — attach by filesystem `path` (the server reads the bytes, so no base64 passes through the model) or by raw base64, with full structural-integrity validation that fails fast on corrupted or mistranscribed data instead of silently sending it
 
 ## Useful Docs
 - [📒 API Documentation](https://postmarkapp.com/developer)
@@ -73,6 +74,7 @@ Edit your `.env` to contain your Postmark credentials and settings.
 |---|---|---|
 | `AGENT_LABEL` | — | A label for this instance (e.g., `prod`, `staging`). Sent as `X-Agent-Label` on every Postmark API request, useful for identifying traffic sources in logs or support tickets. |
 | `WEBHOOK_URL_ALLOWLIST` | — | Comma-separated list of HTTPS URL prefixes that `createWebhook` will accept (e.g., `https://hooks.yourapp.com,https://inbound.corp.io`). When unset, any valid HTTPS URL is accepted. |
+| `POSTMARK_ATTACHMENT_DIR` | — | Restricts attachment `path` reads to a single directory; paths resolving outside it are rejected (symlinks are resolved first). When unset, any file the server process can read may be attached. See [Attachments](#sendemail). |
 | `LOG_FILE` | — | Path to a file where structured JSON logs are appended in addition to stderr. The file is created if it does not exist. No rotation or size cap is applied — use an external tool such as `logrotate` to manage the file in long-running deployments. |
 | `LOG_EMAIL_FULL` | `false` | Set to `true` to log email addresses without masking. By default the mailbox portion is partially masked in logs (`u**r@example.com`). |
 
@@ -220,11 +222,14 @@ Send an email using Postmark to recipient@example.com with the subject "Meeting 
   "cc": "manager@example.com",
   "bcc": "archive@example.com",
   "replyTo": "support@example.com",
-  "tag": "meetings"
+  "tag": "meetings",
+  "attachments": [
+    { "path": "/Users/me/Documents/invoice.pdf" }
+  ]
 }
 ```
 
-`to` accepts a single address or an array of up to 50 addresses. `htmlBody`, `from`, `cc`, `bcc`, `replyTo`, and `tag` are optional. If `from` is omitted, `DEFAULT_SENDER_EMAIL` is used.
+`to` accepts a single address or an array of up to 50 addresses. `htmlBody`, `from`, `cc`, `bcc`, `replyTo`, `tag`, and `attachments` are optional. If `from` is omitted, `DEFAULT_SENDER_EMAIL` is used.
 
 **Response:**
 ```
@@ -233,6 +238,61 @@ MessageID: 0a1b2c3d-...
 To: recipient@example.com
 Subject: Meeting Reminder
 ```
+
+**Attachments:** `sendEmail`, `sendEmailWithTemplate`, and each message/recipient in `sendBatch` / `sendBatchWithTemplate` accept an optional `attachments` array (max 10 per message). Each entry supplies the file **either** by `path` (preferred) **or** by `content`:
+
+| Field | Required | Description |
+|---|---|---|
+| `path` | either `path` or `content` | **Preferred.** Filesystem path to the file **on the machine running this server**, e.g. `"/Users/me/Downloads/logo.png"` or `"./invoice.pdf"`. The server reads the bytes itself; `name` and `contentType` are inferred. |
+| `content` | either `path` or `content` | Base64-encoded file content. Only for data that is already available verbatim — see the warning below. |
+| `name` | with `content` | Filename including extension, e.g. `"invoice.pdf"`. Defaults to the file's basename when using `path`. |
+| `contentType` | with `content` | MIME type, e.g. `"image/png"`, `"application/pdf"`. Inferred from the extension when using `path`. |
+| `contentId` | no | Reference as `cid:<contentId>` inside `htmlBody` to render inline instead of as a downloadable file. Must be unique within the message. |
+
+#### Why `path` is preferred
+
+> **An AI assistant cannot reliably produce a file's base64 itself.** MCP has no mechanism for a client to hand a server the bytes of a user-uploaded file — [tool arguments are JSON only](https://modelcontextprotocol.io/specification/2025-11-25/server/tools), and image/blob content blocks exist only on the *result* side. [Roots](https://modelcontextprotocol.io/specification/2025-11-25/client/roots) carry `file://` URIs, never bytes, and Claude Desktop doesn't support them. Anthropic's own [MCP File Uploads working group](https://modelcontextprotocol.io/community/working-groups/file-uploads) names this gap explicitly; the proposed fix ([SEP-2631](https://github.com/modelcontextprotocol/modelcontextprotocol/pull/2631)) is still a draft.
+>
+> That leaves the model emitting base64 into the tool call — and a modest 70 KB image is ~93,000 base64 characters, on the order of 25–30k output tokens in a single call. In practice it gets **truncated** partway (producing a valid-alphabet string of the wrong length, or a clean cut that decodes to a corrupt file), or **fabricated** outright when the model only ever saw the file as a rendered image rather than as bytes. `path` sidesteps all of it: the model emits a short string and the server reads the real file.
+>
+> **`path` is resolved on the machine running this server, which is not always where the caller lives.** This is a local stdio server, so it reads the filesystem of the host that spawned it. An assistant calling it may be reasoning inside its own container, where conversation uploads are mounted under paths like `/mnt/user-data/`. Those paths are real for the caller and meaningless here, so the server names the mismatch explicitly rather than reporting a bare "file not found":
+>
+> ```
+> "/mnt/user-data/uploads/logo.png" looks like a path inside your own execution sandbox,
+> which is a different filesystem from the one this MCP server reads. This server runs as a
+> local process on the user's machine (its working directory is "...") and can only open
+> files that exist there.
+> ```
+>
+> **So a file that exists only as a conversation upload cannot be attached at all** — it is on neither filesystem in a form the server can read, and base64 is not a workaround (the caller's own file-read limits mean it arrives spliced together and corrupt). Ask the user to save it to their machine and give you that path. A file already on the user's machine — a download, a repo file, anything they can name — works fine.
+
+Reading a local file and emailing it outbound is an exfiltration path if a filename ever originates from untrusted content rather than the user. Set **`POSTMARK_ATTACHMENT_DIR`** to confine `path` reads to one directory (symlinks are resolved before the check, so a link inside it can't escape); leave it unset to allow any file the server process can read.
+
+Before anything is sent, each attachment is checked for well-formed base64 and — for common image types and PDF — its decoded bytes go through a full structural-integrity check for that format, not just a header/magic-bytes check: PNG's chunk stream is walked and every chunk's CRC32 is verified; JPEG/GIF require the correct start-of-file marker *and* end-of-file marker; WEBP's declared RIFF size must match the actual data length; PDF must end in `%%EOF`. A header-only check would pass a file that starts correctly but has a corrupted or truncated body — exactly what silent base64 mistranscription tends to produce, since the start of a long string is more likely to survive intact than the middle or end. A failed check raises a tool error immediately and **nothing is sent**, so it's always safe to retry with corrected data. When base64 validation fails, the error explicitly directs the caller to `path` rather than to another base64 attempt, which would fail identically.
+
+#### Attachment limits
+
+These are [Postmark's own documented limits](https://postmarkapp.com/support/article/1056-what-are-the-attachment-and-email-size-limits) — this tool enforces them locally so an oversized or disallowed attachment fails immediately with a clear message instead of being rejected deep inside a Postmark API error, or (worse) silently sent broken.
+
+| Limit | Value | Applies to |
+|---|---|---|
+| Total message size (body + all attachments combined) | **10 MB**, measured *after* base64 encoding | Each message in `sendEmail` / `sendEmailWithTemplate` / one entry in `sendBatch` / `sendBatchWithTemplate` |
+| `textBody` / `htmlBody`, each | **5 MB** | `sendEmail`, `sendBatch` (not checked for template-based sends — see note below) |
+| Total batch payload (all messages combined) | **50 MB** | `sendBatch`, `sendBatchWithTemplate` |
+| Attachments per message | **10** (this tool's own conservative default, not a Postmark limit) | All four sending tools |
+
+**A full-resolution photo from a modern phone camera is often 3–8 MB by itself** — comfortably within a single attachment, but two or three of them in one message can exceed the 10 MB total. Compress or resize large images before attaching rather than sending the original when size is a concern.
+
+**Forbidden file extensions** — Postmark rejects these outright, regardless of `contentType` or content, mostly executables and script formats:
+```
+vbs, exe, bin, bat, chm, com, cpl, crt, hlp, hta, inf, ins, isp, jse, lnk, mdb,
+pcd, pif, reg, scr, sct, shs, vbe, vba, wsf, wsh, wsl, msc, msi, msp, mst
+```
+The check matches the filename's extension only (case-insensitive) — rename or re-package a file if it needs to go through as a different format (e.g., zip a `.bat` script rather than attaching it directly).
+
+**Template-based sends** (`sendEmailWithTemplate`, `sendBatchWithTemplate`): Postmark renders the body from the template server-side, so its size isn't known until after the send — the 10 MB ceiling is still enforced against the attachments alone, but a very large rendered template combined with large attachments could still be rejected by Postmark itself even after passing local validation.
+
+**What happens when a limit is exceeded:** the tool call fails immediately with an error naming the specific limit and the actual size involved (e.g. `"combined size is 12.0 MB ... exceeds Postmark's 10 MB total message limit"`) — nothing is sent, and no partial or corrupted email goes out. This is the same fail-fast behavior as the base64/signature checks above.
 
 ### sendEmailWithTemplate
 Sends an email using a Postmark template.
@@ -256,7 +316,7 @@ Send the "welcome" template to customer@example.com with name "John Doe" and log
 }
 ```
 
-Provide **either** `templateId` (number) **or** `templateAlias` (string), not both.
+Provide **either** `templateId` (number) **or** `templateAlias` (string), not both. Also accepts an optional `attachments` array — see [Attachments](#sendemail) above.
 
 **Response:**
 ```
@@ -291,7 +351,7 @@ Sends up to 500 emails in a single API call. Each message is fully independent �
 }
 ```
 
-Per-message fields: `to`, `subject`, `textBody` are required. `htmlBody`, `from`, `cc`, `bcc`, `replyTo`, and `tag` are optional. If `from` is omitted on a message, `DEFAULT_SENDER_EMAIL` is used.
+Per-message fields: `to`, `subject`, `textBody` are required. `htmlBody`, `from`, `cc`, `bcc`, `replyTo`, `tag`, and `attachments` are optional (see [Attachments](#sendemail) above). If `from` is omitted on a message, `DEFAULT_SENDER_EMAIL` is used.
 
 **Response:**
 ```
@@ -328,7 +388,7 @@ Sends up to 500 templated emails — same template, per-recipient template model
 }
 ```
 
-Provide **either** `templateId` (number) **or** `templateAlias` (string). Top-level `from` and `tag` apply to all recipients but can be overridden per-recipient. Each recipient also accepts optional `cc`, `bcc`, and `replyTo`.
+Provide **either** `templateId` (number) **or** `templateAlias` (string). Top-level `from` and `tag` apply to all recipients but can be overridden per-recipient. Each recipient also accepts optional `cc`, `bcc`, `replyTo`, and `attachments` (see [Attachments](#sendemail) above).
 
 **Response:** same format as `sendBatch`.
 
@@ -740,6 +800,9 @@ To secure your webhook receiver, whitelist [Postmark's published sending IPs](ht
 
 ### Prompt injection risk
 Because this MCP server can send email and register webhooks, it is a potential target for [prompt injection](https://owasp.org/www-project-top-10-for-large-language-model-applications/) — where malicious content in an email, template, or repository tricks the AI into invoking a tool with unintended arguments. The mitigations above (dedicated token, tool approval in your MCP client, `WEBHOOK_URL_ALLOWLIST`) reduce the blast radius if this occurs. Never configure auto-approval for sending or destructive tools in untrusted environments.
+
+### Repeated or corrective sends
+Every sending tool's description states explicitly that it sends immediately, cannot be recalled, and must not be called again to "correct" a previous send without confirming with the user first. This is a prompt-level mitigation — the server has no mechanism to stop a client from invoking a tool twice — but it measurably reduces the risk of an assistant silently sending a duplicate or follow-up email after deciding (correctly or not) that an earlier send had a problem. That risk is sharpest for time-sensitive content such as OTP codes or expiring links, where an unexpected second email is itself confusing at best. Attachment validation (above) closes off the most common trigger for this pattern: a corrupted or mistranscribed attachment that an assistant might otherwise try to quietly "fix" with a second send instead of surfacing the failure and asking.
 
 ---
 

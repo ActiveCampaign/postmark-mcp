@@ -14,10 +14,17 @@
 //
 // This script runs full create→edit→delete lifecycles for templates,
 // layouts, webhooks, and suppressions, plus real email sends from SENDER
-// to RECIPIENT (single, templated, batch of 3, template-batch of 2 — total
-// 7 emails). It cleans up after itself; check your inbox to confirm sends.
+// to RECIPIENT (single, templated, single-with-a-valid-attachment,
+// single-with-an-attachment-read-by-path, batch of 3, template-batch of 2 —
+// total 9 emails). It also confirms that a corrupted attachment and a
+// nonexistent attachment path are both rejected locally (no email sent)
+// rather than silently going out broken. It cleans up after itself; check
+// your inbox to confirm sends.
 
 import "dotenv/config";
+import { writeFileSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
@@ -44,6 +51,10 @@ const TEMPLATE_ALIAS = `mcp-smoke-${ts}`;
 const LAYOUT_ALIAS = `mcp-smoke-layout-${ts}`;
 const WEBHOOK_URL = `https://example.com/mcp-smoke-${ts}`;
 const SUPPRESS_EMAIL = `mcp-smoke-${ts}@example.com`;
+
+// Real, verified 1x1 truecolor+alpha PNG (70 bytes) — constructed and
+// CRC-validated programmatically (see test-offline.mjs), not typed from memory.
+const TINY_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 
 const transport = new StdioClientTransport({ command: "node", args: ["index.js"] });
 const client = new Client({ name: "smoke-mutating", version: "0.0.0" }, { capabilities: {} });
@@ -175,6 +186,53 @@ try {
     tag: "mcp-smoke-test",
   });
   log("sendEmailWithTemplate (real send)", r.ok, r.text);
+
+  // ─────────── Attachment validation ───────────
+  r = await call("sendEmail", {
+    to: RECIPIENT,
+    from: SENDER,
+    subject: `MCP smoke test — attachment ${ts}`,
+    textBody: "Real send with a valid attachment.",
+    tag: "mcp-smoke-test",
+    attachments: [{ name: "pixel.png", content: TINY_PNG_BASE64, contentType: "image/png" }],
+  });
+  log("sendEmail (real send, valid attachment)", r.ok && r.text.includes("Attachments: pixel.png"), r.text);
+
+  r = await call("sendEmail", {
+    to: RECIPIENT,
+    from: SENDER,
+    subject: `MCP smoke test — corrupted attachment ${ts}`,
+    textBody: "This send should be rejected before anything goes out.",
+    tag: "mcp-smoke-test",
+    attachments: [{ name: "bad.png", content: TINY_PNG_BASE64.slice(0, -10), contentType: "image/png" }],
+  });
+  log("sendEmail (corrupted attachment rejected, nothing sent)", !r.ok, r.text);
+
+  // `path` mode — the server reads the file itself, so no base64 crosses the
+  // tool call. This is the mode that actually works for real-world file sizes.
+  const pngPath = join(tmpdir(), `mcp-smoke-${ts}.png`);
+  writeFileSync(pngPath, Buffer.from(TINY_PNG_BASE64, "base64"));
+  r = await call("sendEmail", {
+    to: RECIPIENT,
+    from: SENDER,
+    subject: `MCP smoke test — attachment by path ${ts}`,
+    textBody: "Real send with an attachment read from disk by path.",
+    tag: "mcp-smoke-test",
+    attachments: [{ path: pngPath }],
+  });
+  log("sendEmail (real send, attachment by path, name/contentType inferred)",
+    r.ok && r.text.includes(`Attachments: mcp-smoke-${ts}.png`), r.text);
+  rmSync(pngPath, { force: true });
+
+  r = await call("sendEmail", {
+    to: RECIPIENT,
+    from: SENDER,
+    subject: `MCP smoke test — missing path ${ts}`,
+    textBody: "This send should be rejected before anything goes out.",
+    tag: "mcp-smoke-test",
+    attachments: [{ path: join(tmpdir(), `mcp-smoke-does-not-exist-${ts}.png`) }],
+  });
+  log("sendEmail (nonexistent path rejected, nothing sent)", !r.ok, r.text);
 
   // ─────────── Batch sends ───────────
   r = await call("sendBatch", {
