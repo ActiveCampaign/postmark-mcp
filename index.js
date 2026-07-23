@@ -13,6 +13,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { createRequire } from 'module';
 import { createLogger } from './lib/log.js';
+import { attachmentsSchema, validateAttachment, buildAttachments, assertMessageSize, assertBatchPayloadSize } from './lib/attachments.js';
 
 const require = createRequire(import.meta.url);
 const { version: clientVersion } = require('./package.json');
@@ -440,7 +441,7 @@ function registerTools(server) {
 
   server.tool(
     "sendEmail",
-    "Send a single transactional email via Postmark. Accepts one recipient or an array of up to 50. The From address must be a verified sender signature. Open and link tracking are enabled automatically. Use sendBatch to send multiple distinct messages in one call.",
+    "Send a single transactional email via Postmark. Accepts one recipient or an array of up to 50. The From address must be a verified sender signature. Open and link tracking are enabled automatically. Use sendBatch to send multiple distinct messages in one call. Sends immediately and cannot be recalled — if a send needs correcting, confirm with the user before sending again rather than resending automatically (important for time-sensitive content like OTP codes or expiring links).",
     {
       to: z.union([
         z.string().email(),
@@ -453,10 +454,11 @@ function registerTools(server) {
       cc: z.string().optional().describe("CC recipient(s), comma-separated (optional)"),
       bcc: z.string().optional().describe("BCC recipient(s), comma-separated (optional)"),
       replyTo: z.string().email().optional().describe("Reply-To address (optional)"),
-      tag: z.string().optional().describe("Optional tag for categorization")
+      tag: z.string().optional().describe("Optional tag for categorization"),
+      attachments: attachmentsSchema
     },
     MUTATING,
-    async ({ to, subject, textBody, htmlBody, from, cc, bcc, replyTo, tag }) => {
+    async ({ to, subject, textBody, htmlBody, from, cc, bcc, replyTo, tag, attachments }) => {
       const emailData = {
         From: from || defaultSender,
         To: Array.isArray(to) ? to.join(', ') : to,
@@ -472,6 +474,14 @@ function registerTools(server) {
       if (bcc) emailData.Bcc = bcc;
       if (replyTo) emailData.ReplyTo = replyTo;
       if (tag) emailData.Tag = tag;
+      const builtAttachments = buildAttachments(attachments);
+      if (builtAttachments) emailData.Attachments = builtAttachments;
+      assertMessageSize({
+        label: 'sendEmail',
+        textBody,
+        htmlBody,
+        attachmentBytes: builtAttachments?.reduce((sum, a) => sum + a.Content.length, 0) ?? 0,
+      });
 
       const result = await postmarkRequest('/email', { method: 'POST', body: JSON.stringify(emailData) });
       if (result.ErrorCode !== 0) {
@@ -482,7 +492,8 @@ function registerTools(server) {
       return {
         content: [{
           type: "text",
-          text: `Email sent successfully!\nMessageID: ${result.MessageID}\nTo: ${to}\nSubject: ${subject}`
+          text: `Email sent successfully!\nMessageID: ${result.MessageID}\nTo: ${to}\nSubject: ${subject}` +
+            (builtAttachments ? `\nAttachments: ${builtAttachments.map(a => a.Name).join(', ')}` : '')
         }]
       };
     }
@@ -490,7 +501,7 @@ function registerTools(server) {
 
   server.tool(
     "sendEmailWithTemplate",
-    "Send a single email rendered from a saved Postmark template. Supply either templateId (numeric) or templateAlias (string) plus a templateModel object that provides the template variables. The From address must be a verified sender signature.",
+    "Send a single email rendered from a saved Postmark template. Supply either templateId (numeric) or templateAlias (string) plus a templateModel object that provides the template variables. The From address must be a verified sender signature. Sends immediately and cannot be recalled — if a send needs correcting, confirm with the user before sending again rather than resending automatically (important for time-sensitive content like OTP codes or expiring links).",
     {
       to: z.string().email().describe("Recipient email address"),
       templateId: z.number().optional().describe("Template ID — provide either this or templateAlias, not both"),
@@ -500,10 +511,11 @@ function registerTools(server) {
       cc: z.string().optional().describe("CC recipient(s), comma-separated (optional)"),
       bcc: z.string().optional().describe("BCC recipient(s), comma-separated (optional)"),
       replyTo: z.string().email().optional().describe("Reply-To address (optional)"),
-      tag: z.string().optional().describe("Optional tag for categorization")
+      tag: z.string().optional().describe("Optional tag for categorization"),
+      attachments: attachmentsSchema
     },
     MUTATING,
-    async ({ to, templateId, templateAlias, templateModel, from, cc, bcc, replyTo, tag }) => {
+    async ({ to, templateId, templateAlias, templateModel, from, cc, bcc, replyTo, tag, attachments }) => {
       if (!templateId && !templateAlias) {
         throw new Error("Either templateId or templateAlias must be provided");
       }
@@ -530,6 +542,15 @@ function registerTools(server) {
       if (bcc) emailData.Bcc = bcc;
       if (replyTo) emailData.ReplyTo = replyTo;
       if (tag) emailData.Tag = tag;
+      const builtAttachments = buildAttachments(attachments);
+      if (builtAttachments) emailData.Attachments = builtAttachments;
+      // textBody/htmlBody are omitted here — Postmark renders the body from the
+      // template server-side, so its size isn't known client-side. The 10 MB
+      // ceiling still applies to attachments alone.
+      assertMessageSize({
+        label: 'sendEmailWithTemplate',
+        attachmentBytes: builtAttachments?.reduce((sum, a) => sum + a.Content.length, 0) ?? 0,
+      });
 
       console.error('Sending template email..', { templateId: templateId || templateAlias });
       const result = await postmarkRequest('/email/withTemplate', { method: 'POST', body: JSON.stringify(emailData) });
@@ -541,7 +562,8 @@ function registerTools(server) {
       return {
         content: [{
           type: "text",
-          text: `Template email sent successfully!\nMessageID: ${result.MessageID}\nTo: ${to}\nTemplate: ${templateId || templateAlias}`
+          text: `Template email sent successfully!\nMessageID: ${result.MessageID}\nTo: ${to}\nTemplate: ${templateId || templateAlias}` +
+            (builtAttachments ? `\nAttachments: ${builtAttachments.map(a => a.Name).join(', ')}` : '')
         }]
       };
     }
@@ -580,7 +602,7 @@ function registerTools(server) {
 
   server.tool(
     "sendBatch",
-    "Send up to 500 independent emails in a single synchronous Postmark API call (POST /email/batch). Each message has its own recipient, subject, and body. Returns per-message results — the overall HTTP call succeeds even when individual messages fail. Use sendEmail for a single message.",
+    "Send up to 500 independent emails in a single synchronous Postmark API call (POST /email/batch). Each message has its own recipient, subject, and body. Returns per-message results — the overall HTTP call succeeds even when individual messages fail. Use sendEmail for a single message. Sends immediately and cannot be recalled — if a send needs correcting, confirm with the user before sending again rather than resending automatically (important for time-sensitive content like OTP codes or expiring links).",
     {
       messages: z.array(z.object({
         to: z.string().email().describe("Recipient email address"),
@@ -591,12 +613,14 @@ function registerTools(server) {
         cc: z.string().optional().describe("CC recipient(s), comma-separated"),
         bcc: z.string().optional().describe("BCC recipient(s), comma-separated"),
         replyTo: z.string().email().optional().describe("Reply-To address"),
-        tag: z.string().optional().describe("Tag for categorization")
+        tag: z.string().optional().describe("Tag for categorization"),
+        attachments: attachmentsSchema
       })).min(1).max(500).describe("Up to 500 messages to send in a single request")
     },
     MUTATING,
     async ({ messages }) => {
-      const payload = messages.map(m => {
+      let batchBytes = 0;
+      const payload = messages.map((m, i) => {
         const msg = {
           From: m.from || defaultSender,
           To: m.to,
@@ -611,8 +635,16 @@ function registerTools(server) {
         if (m.bcc) msg.Bcc = m.bcc;
         if (m.replyTo) msg.ReplyTo = m.replyTo;
         if (m.tag) msg.Tag = m.tag;
+        let attachmentBytes = 0;
+        if (m.attachments?.length) {
+          msg.Attachments = m.attachments.map((att, j) => validateAttachment(att, `messages[${i}].attachments[${j}]`));
+          attachmentBytes = msg.Attachments.reduce((sum, a) => sum + a.Content.length, 0);
+        }
+        assertMessageSize({ label: `messages[${i}]`, textBody: m.textBody, htmlBody: m.htmlBody, attachmentBytes });
+        batchBytes += attachmentBytes + Buffer.byteLength(m.textBody || '', 'utf8') + Buffer.byteLength(m.htmlBody || '', 'utf8');
         return msg;
       });
+      assertBatchPayloadSize(batchBytes, 'sendBatch');
 
       console.error('Sending batch..', { count: payload.length });
       const results = await postmarkRequest('/email/batch', { method: 'POST', body: JSON.stringify(payload) });
@@ -625,7 +657,7 @@ function registerTools(server) {
 
   server.tool(
     "sendBatchWithTemplate",
-    "Send the same Postmark template to up to 500 recipients in a single call, with per-recipient template models (POST /email/batchWithTemplates). Supply either templateId or templateAlias. Returns per-message results. Use sendEmailWithTemplate for a single recipient.",
+    "Send the same Postmark template to up to 500 recipients in a single call, with per-recipient template models (POST /email/batchWithTemplates). Supply either templateId or templateAlias. Returns per-message results. Use sendEmailWithTemplate for a single recipient. Sends immediately and cannot be recalled — if a send needs correcting, confirm with the user before sending again rather than resending automatically (important for time-sensitive content like OTP codes or expiring links).",
     {
       templateId: z.number().int().optional().describe("Template ID (use either this or templateAlias)"),
       templateAlias: z.string().optional().describe("Template alias (use either this or templateId)"),
@@ -638,7 +670,8 @@ function registerTools(server) {
         cc: z.string().optional().describe("CC recipient(s), comma-separated"),
         bcc: z.string().optional().describe("BCC recipient(s), comma-separated"),
         replyTo: z.string().email().optional().describe("Reply-To address"),
-        tag: z.string().optional().describe("Override tag for this recipient")
+        tag: z.string().optional().describe("Override tag for this recipient"),
+        attachments: attachmentsSchema
       })).min(1).max(500).describe("Up to 500 recipients, each with their own template model")
     },
     MUTATING,
@@ -650,7 +683,8 @@ function registerTools(server) {
         throw new Error("Provide only one of templateId or templateAlias, not both");
       }
 
-      const payload = recipients.map(r => {
+      let batchBytes = 0;
+      const payload = recipients.map((r, i) => {
         const msg = {
           From: r.from || from || defaultSender,
           To: r.to,
@@ -666,8 +700,17 @@ function registerTools(server) {
         if (r.replyTo) msg.ReplyTo = r.replyTo;
         const effectiveTag = r.tag ?? tag;
         if (effectiveTag) msg.Tag = effectiveTag;
+        let attachmentBytes = 0;
+        if (r.attachments?.length) {
+          msg.Attachments = r.attachments.map((att, j) => validateAttachment(att, `recipients[${i}].attachments[${j}]`));
+          attachmentBytes = msg.Attachments.reduce((sum, a) => sum + a.Content.length, 0);
+        }
+        // templateModel's rendered size isn't known client-side — see sendEmailWithTemplate.
+        assertMessageSize({ label: `recipients[${i}]`, attachmentBytes });
+        batchBytes += attachmentBytes;
         return msg;
       });
+      assertBatchPayloadSize(batchBytes, 'sendBatchWithTemplate');
 
       console.error('Sending template batch..', { count: payload.length, template: templateId || templateAlias });
       const results = await postmarkRequest('/email/batchWithTemplates', { method: 'POST', body: JSON.stringify({ Messages: payload }) });

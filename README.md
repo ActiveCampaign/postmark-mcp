@@ -11,6 +11,7 @@ Send emails with Postmark using Claude and other MCP-compatible AI assistants.
 - Structured JSON logging to stderr with optional log-file persistence; email addresses are partially masked by default
 - HTTPS enforcement and optional domain allowlist for webhook registration
 - Automatic open/click tracking on every send
+- File attachments on every sending tool, with base64/file-signature validation that fails fast on corrupted or mistranscribed data instead of silently sending it
 
 ## Useful Docs
 - [📒 API Documentation](https://postmarkapp.com/developer)
@@ -220,11 +221,14 @@ Send an email using Postmark to recipient@example.com with the subject "Meeting 
   "cc": "manager@example.com",
   "bcc": "archive@example.com",
   "replyTo": "support@example.com",
-  "tag": "meetings"
+  "tag": "meetings",
+  "attachments": [
+    { "name": "invoice.pdf", "content": "JVBERi0xLjQKJ...", "contentType": "application/pdf" }
+  ]
 }
 ```
 
-`to` accepts a single address or an array of up to 50 addresses. `htmlBody`, `from`, `cc`, `bcc`, `replyTo`, and `tag` are optional. If `from` is omitted, `DEFAULT_SENDER_EMAIL` is used.
+`to` accepts a single address or an array of up to 50 addresses. `htmlBody`, `from`, `cc`, `bcc`, `replyTo`, `tag`, and `attachments` are optional. If `from` is omitted, `DEFAULT_SENDER_EMAIL` is used.
 
 **Response:**
 ```
@@ -233,6 +237,41 @@ MessageID: 0a1b2c3d-...
 To: recipient@example.com
 Subject: Meeting Reminder
 ```
+
+**Attachments:** `sendEmail`, `sendEmailWithTemplate`, and each message/recipient in `sendBatch` / `sendBatchWithTemplate` accept an optional `attachments` array (max 10 per message):
+
+| Field | Required | Description |
+|---|---|---|
+| `name` | yes | Filename including extension, e.g. `"invoice.pdf"` |
+| `content` | yes | Base64-encoded file content |
+| `contentType` | yes | MIME type, e.g. `"image/png"`, `"application/pdf"` |
+| `contentId` | no | Reference as `cid:<contentId>` inside `htmlBody` to render inline instead of as a downloadable file. Must be unique within the message. |
+
+Before anything is sent, each attachment's `content` is checked for well-formed base64 and — for common image types and PDF — its decoded bytes are checked against the file signature implied by `contentType`. A failed check raises a tool error immediately and **nothing is sent**, so it's always safe to retry with corrected data. This exists specifically to prevent a corrupted or mistranscribed attachment from silently going out as an apparently-successful send.
+
+#### Attachment limits
+
+These are [Postmark's own documented limits](https://postmarkapp.com/support/article/1056-what-are-the-attachment-and-email-size-limits) — this tool enforces them locally so an oversized or disallowed attachment fails immediately with a clear message instead of being rejected deep inside a Postmark API error, or (worse) silently sent broken.
+
+| Limit | Value | Applies to |
+|---|---|---|
+| Total message size (body + all attachments combined) | **10 MB**, measured *after* base64 encoding | Each message in `sendEmail` / `sendEmailWithTemplate` / one entry in `sendBatch` / `sendBatchWithTemplate` |
+| `textBody` / `htmlBody`, each | **5 MB** | `sendEmail`, `sendBatch` (not checked for template-based sends — see note below) |
+| Total batch payload (all messages combined) | **50 MB** | `sendBatch`, `sendBatchWithTemplate` |
+| Attachments per message | **10** (this tool's own conservative default, not a Postmark limit) | All four sending tools |
+
+**A full-resolution photo from a modern phone camera is often 3–8 MB by itself** — comfortably within a single attachment, but two or three of them in one message can exceed the 10 MB total. Compress or resize large images before attaching rather than sending the original when size is a concern.
+
+**Forbidden file extensions** — Postmark rejects these outright, regardless of `contentType` or content, mostly executables and script formats:
+```
+vbs, exe, bin, bat, chm, com, cpl, crt, hlp, hta, inf, ins, isp, jse, lnk, mdb,
+pcd, pif, reg, scr, sct, shs, vbe, vba, wsf, wsh, wsl, msc, msi, msp, mst
+```
+The check matches the filename's extension only (case-insensitive) — rename or re-package a file if it needs to go through as a different format (e.g., zip a `.bat` script rather than attaching it directly).
+
+**Template-based sends** (`sendEmailWithTemplate`, `sendBatchWithTemplate`): Postmark renders the body from the template server-side, so its size isn't known until after the send — the 10 MB ceiling is still enforced against the attachments alone, but a very large rendered template combined with large attachments could still be rejected by Postmark itself even after passing local validation.
+
+**What happens when a limit is exceeded:** the tool call fails immediately with an error naming the specific limit and the actual size involved (e.g. `"combined size is 12.0 MB ... exceeds Postmark's 10 MB total message limit"`) — nothing is sent, and no partial or corrupted email goes out. This is the same fail-fast behavior as the base64/signature checks above.
 
 ### sendEmailWithTemplate
 Sends an email using a Postmark template.
@@ -256,7 +295,7 @@ Send the "welcome" template to customer@example.com with name "John Doe" and log
 }
 ```
 
-Provide **either** `templateId` (number) **or** `templateAlias` (string), not both.
+Provide **either** `templateId` (number) **or** `templateAlias` (string), not both. Also accepts an optional `attachments` array — see [Attachments](#sendemail) above.
 
 **Response:**
 ```
@@ -291,7 +330,7 @@ Sends up to 500 emails in a single API call. Each message is fully independent �
 }
 ```
 
-Per-message fields: `to`, `subject`, `textBody` are required. `htmlBody`, `from`, `cc`, `bcc`, `replyTo`, and `tag` are optional. If `from` is omitted on a message, `DEFAULT_SENDER_EMAIL` is used.
+Per-message fields: `to`, `subject`, `textBody` are required. `htmlBody`, `from`, `cc`, `bcc`, `replyTo`, `tag`, and `attachments` are optional (see [Attachments](#sendemail) above). If `from` is omitted on a message, `DEFAULT_SENDER_EMAIL` is used.
 
 **Response:**
 ```
@@ -328,7 +367,7 @@ Sends up to 500 templated emails — same template, per-recipient template model
 }
 ```
 
-Provide **either** `templateId` (number) **or** `templateAlias` (string). Top-level `from` and `tag` apply to all recipients but can be overridden per-recipient. Each recipient also accepts optional `cc`, `bcc`, and `replyTo`.
+Provide **either** `templateId` (number) **or** `templateAlias` (string). Top-level `from` and `tag` apply to all recipients but can be overridden per-recipient. Each recipient also accepts optional `cc`, `bcc`, `replyTo`, and `attachments` (see [Attachments](#sendemail) above).
 
 **Response:** same format as `sendBatch`.
 
@@ -740,6 +779,9 @@ To secure your webhook receiver, whitelist [Postmark's published sending IPs](ht
 
 ### Prompt injection risk
 Because this MCP server can send email and register webhooks, it is a potential target for [prompt injection](https://owasp.org/www-project-top-10-for-large-language-model-applications/) — where malicious content in an email, template, or repository tricks the AI into invoking a tool with unintended arguments. The mitigations above (dedicated token, tool approval in your MCP client, `WEBHOOK_URL_ALLOWLIST`) reduce the blast radius if this occurs. Never configure auto-approval for sending or destructive tools in untrusted environments.
+
+### Repeated or corrective sends
+Every sending tool's description states explicitly that it sends immediately, cannot be recalled, and must not be called again to "correct" a previous send without confirming with the user first. This is a prompt-level mitigation — the server has no mechanism to stop a client from invoking a tool twice — but it measurably reduces the risk of an assistant silently sending a duplicate or follow-up email after deciding (correctly or not) that an earlier send had a problem. That risk is sharpest for time-sensitive content such as OTP codes or expiring links, where an unexpected second email is itself confusing at best. Attachment validation (above) closes off the most common trigger for this pattern: a corrupted or mistranscribed attachment that an assistant might otherwise try to quietly "fix" with a second send instead of surfacing the failure and asking.
 
 ---
 

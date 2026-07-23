@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **File attachments on all four sending tools** (`sendEmail`, `sendEmailWithTemplate`, `sendBatch`, `sendBatchWithTemplate`). Each accepts an optional `attachments` array (max 10 per message) of `{ name, content, contentType, contentId? }`, mapped to Postmark's native `Attachments` field. `contentId` allows inline `cid:` references from `htmlBody`.
+- **Attachment content validation.** Before a send reaches Postmark, each attachment's base64 `content` is checked for well-formed encoding (valid alphabet, correct padding, round-trip re-encode) and, for common image types and PDF, the decoded bytes are checked against the file signature implied by `contentType`. A failed check raises a tool error immediately and nothing is sent.
+- **Postmark's documented size and file-type limits are now enforced locally**, with the actual numbers surfaced in each tool's description and in [README.md](README.md#attachment-limits): 10 MB total per message (body + attachments, measured after base64 encoding), 5 MB per `textBody`/`htmlBody` section, 50 MB total per batch call, and Postmark's forbidden-extension list (`vbs`, `exe`, `bin`, `bat`, and 27 others — mostly executables/scripts). A violation fails the tool call immediately with the specific limit and actual size, instead of an opaque rejection from Postmark (or, previously, no check at all).
+- **`lib/attachments.js`** — attachment validation (base64/signature/size/extension checks) extracted from `index.js`, mirroring the existing `lib/log.js` pattern, so this logic is directly unit-testable with multi-megabyte inputs at millisecond speed instead of only reachable through a real MCP/stdio round-trip.
+
+### Fixed
+
+- **A corrupted attachment could previously go out as an apparently-successful send.** With no `Attachments` field available at all, the only way to include an image was to hand-embed it as a base64 data URI inside `htmlBody` — a plain string with no validation. Because a model reconstructs base64 as text rather than copying exact bytes, that embedding was prone to silent corruption, and Postmark had nothing to reject it on. The new attachment field plus validation above closes this off: bad data now fails the tool call before any send happens, rather than surfacing later as a broken image that an assistant might try to quietly fix with an unprompted second send.
+- **Every sending tool's description now states explicitly that it sends immediately, cannot be recalled, and must not be called again to "correct" a previous send without user confirmation** — most relevant for time-sensitive content like OTP codes or expiring links, where a silent duplicate send is its own hazard. This is a prompt-level mitigation (the server can't force a client to comply) but reduces the risk in practice.
+
 ### Planned (deferred from v2.1.0)
 
 - **`getWebhook` tool** — retrieve a single webhook's full configuration by ID (`GET /webhooks/{Id}`). Currently only `listWebhooks` is available; getting a single webhook requires filtering the list by ID.

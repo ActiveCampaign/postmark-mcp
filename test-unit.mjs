@@ -1,7 +1,11 @@
 /**
- * Unit tests for lib/log.js — maskEmail, sanitizeArgs, writeLog.
+ * Unit tests for lib/log.js (maskEmail, sanitizeArgs, writeLog) and
+ * lib/attachments.js (validateAttachment, assertMessageSize, assertBatchPayloadSize).
  *
  * No Postmark account or server required. All tests run against pure functions.
+ * The attachments tests exercise multi-megabyte inputs directly (no MCP/stdio
+ * round-trip), which is what keeps them fast — see test-offline.mjs for the
+ * end-to-end wiring tests through the actual tool calls.
  *
  * Run:  npm test
  *  or:  node --test test-unit.mjs
@@ -13,6 +17,15 @@ import { readFileSync, existsSync, unlinkSync, mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { createLogger } from './lib/log.js';
+import {
+  fmtBytes,
+  validateAttachment,
+  assertMessageSize,
+  assertBatchPayloadSize,
+  POSTMARK_MAX_MESSAGE_BYTES,
+  POSTMARK_MAX_BATCH_PAYLOAD_BYTES,
+  FORBIDDEN_ATTACHMENT_EXTENSIONS,
+} from './lib/attachments.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -267,4 +280,164 @@ test('writeLog: no LOG_FILE does not create a file', () => {
   const path = join(tmpdir(), `postmark-mcp-should-not-exist-${Date.now()}.log`);
   writeLog({ tool: 'getServerInfo', status: 'ok' });
   assert.equal(existsSync(path), false);
+});
+
+// ─── lib/attachments.js — fmtBytes ─────────────────────────────────────────────
+
+test('fmtBytes: bytes under 1024 shown as a plain count', () => {
+  assert.equal(fmtBytes(512), '512 B');
+});
+
+test('fmtBytes: formats KB/MB/GB with one decimal place', () => {
+  assert.equal(fmtBytes(2048), '2.0 KB');
+  assert.equal(fmtBytes(5 * 1024 * 1024), '5.0 MB');
+  assert.equal(fmtBytes(2 * 1024 * 1024 * 1024), '2.0 GB');
+});
+
+// ─── validateAttachment — forbidden extensions ────────────────────────────────
+
+test('validateAttachment: rejects every documented forbidden extension', () => {
+  for (const ext of FORBIDDEN_ATTACHMENT_EXTENSIONS) {
+    assert.throws(
+      () => validateAttachment({ name: `file.${ext}`, content: 'QQ==', contentType: 'application/octet-stream' }, 'attachments[0]'),
+      /forbidden attachment list/,
+      `expected .${ext} to be rejected`,
+    );
+  }
+});
+
+test('validateAttachment: allows an extension not on the forbidden list', () => {
+  assert.doesNotThrow(() =>
+    validateAttachment({ name: 'file.dat', content: 'QQ==', contentType: 'application/octet-stream' }, 'attachments[0]'));
+});
+
+test('validateAttachment: forbidden-extension match is case-insensitive', () => {
+  assert.throws(
+    () => validateAttachment({ name: 'INSTALLER.EXE', content: 'QQ==', contentType: 'application/octet-stream' }, 'attachments[0]'),
+    /forbidden attachment list/,
+  );
+});
+
+test('validateAttachment: filename with no extension is not treated as forbidden', () => {
+  assert.doesNotThrow(() =>
+    validateAttachment({ name: 'README', content: 'QQ==', contentType: 'text/plain' }, 'attachments[0]'));
+});
+
+// ─── validateAttachment — base64 well-formedness ──────────────────────────────
+
+test('validateAttachment: rejects characters outside the base64 alphabet', () => {
+  assert.throws(
+    () => validateAttachment({ name: 'a.txt', content: 'not-valid-base64!!!', contentType: 'text/plain' }, 'attachments[0]'),
+    /base64 alphabet/,
+  );
+});
+
+test('validateAttachment: rejects length not a multiple of 4', () => {
+  assert.throws(
+    () => validateAttachment({ name: 'a.txt', content: 'QQQ', contentType: 'text/plain' }, 'attachments[0]'),
+    /multiple of 4/,
+  );
+});
+
+test('validateAttachment: rejects non-canonical base64 that decodes leniently but fails to round-trip', () => {
+  // "QR==" decodes to the same single byte as "QQ==" (Node ignores the non-zero
+  // padding bits), but re-encoding that byte canonically produces "QQ==", not
+  // "QR==" — exactly the kind of corruption a naive alphabet/length check misses.
+  assert.throws(
+    () => validateAttachment({ name: 'a.txt', content: 'QR==', contentType: 'text/plain' }, 'attachments[0]'),
+    /round-trip/,
+  );
+});
+
+test('validateAttachment: accepts well-formed base64 and maps to Postmark\'s field names', () => {
+  const result = validateAttachment({ name: 'a.txt', content: 'aGVsbG8=', contentType: 'text/plain' }, 'attachments[0]');
+  assert.equal(result.Name, 'a.txt');
+  assert.equal(result.Content, 'aGVsbG8=');
+  assert.equal(result.ContentType, 'text/plain');
+});
+
+test('validateAttachment: maps contentId to Postmark\'s ContentID field', () => {
+  const result = validateAttachment(
+    { name: 'a.png', content: 'aGVsbG8=', contentType: 'text/plain', contentId: 'logo' }, 'attachments[0]');
+  assert.equal(result.ContentID, 'logo');
+});
+
+test('validateAttachment: omits ContentID when not provided', () => {
+  const result = validateAttachment({ name: 'a.txt', content: 'aGVsbG8=', contentType: 'text/plain' }, 'attachments[0]');
+  assert.equal('ContentID' in result, false);
+});
+
+// ─── validateAttachment — file signature ──────────────────────────────────────
+
+test('validateAttachment: rejects content whose signature does not match its declared contentType', () => {
+  assert.throws(
+    () => validateAttachment({ name: 'a.png', content: 'aGVsbG8=', contentType: 'image/png' }, 'attachments[0]'),
+    /file signature/,
+  );
+});
+
+test('validateAttachment: skips the signature check for contentTypes with no known signature', () => {
+  assert.doesNotThrow(() =>
+    validateAttachment({ name: 'a.raw', content: 'aGVsbG8=', contentType: 'application/octet-stream' }, 'attachments[0]'));
+});
+
+// ─── validateAttachment — size limits ─────────────────────────────────────────
+
+test('validateAttachment: rejects a single attachment whose base64 content alone exceeds 10MB', () => {
+  const oversized = 'A'.repeat(POSTMARK_MAX_MESSAGE_BYTES + 4);
+  assert.throws(
+    () => validateAttachment({ name: 'huge.dat', content: oversized, contentType: 'application/octet-stream' }, 'attachments[0]'),
+    /10 MB/,
+  );
+});
+
+test('validateAttachment: accepts an attachment just under the 10MB ceiling', () => {
+  const justUnder = 'A'.repeat(POSTMARK_MAX_MESSAGE_BYTES - 4);
+  assert.doesNotThrow(() =>
+    validateAttachment({ name: 'ok.dat', content: justUnder, contentType: 'application/octet-stream' }, 'attachments[0]'));
+});
+
+// ─── assertMessageSize ─────────────────────────────────────────────────────────
+
+test('assertMessageSize: rejects textBody over 5MB', () => {
+  assert.throws(
+    () => assertMessageSize({ label: 'test', textBody: 'x'.repeat(5 * 1024 * 1024 + 1) }),
+    /5 MB/,
+  );
+});
+
+test('assertMessageSize: rejects htmlBody over 5MB', () => {
+  assert.throws(
+    () => assertMessageSize({ label: 'test', htmlBody: 'x'.repeat(5 * 1024 * 1024 + 1) }),
+    /5 MB/,
+  );
+});
+
+test('assertMessageSize: rejects combined body+attachments over 10MB even when each part alone is under its own limit', () => {
+  assert.throws(
+    () => assertMessageSize({ label: 'test', textBody: 'x'.repeat(4 * 1024 * 1024), attachmentBytes: 7 * 1024 * 1024 }),
+    /10 MB total/,
+  );
+});
+
+test('assertMessageSize: accepts a message comfortably under all limits', () => {
+  assert.doesNotThrow(() =>
+    assertMessageSize({ label: 'test', textBody: 'hello', htmlBody: '<p>hi</p>', attachmentBytes: 1024 }));
+});
+
+test('assertMessageSize: skips body checks entirely when textBody/htmlBody are omitted (template sends)', () => {
+  assert.doesNotThrow(() => assertMessageSize({ label: 'test', attachmentBytes: 1024 }));
+});
+
+// ─── assertBatchPayloadSize ────────────────────────────────────────────────────
+
+test('assertBatchPayloadSize: rejects a total over 50MB', () => {
+  assert.throws(
+    () => assertBatchPayloadSize(POSTMARK_MAX_BATCH_PAYLOAD_BYTES + 1, 'sendBatch'),
+    /50 MB/,
+  );
+});
+
+test('assertBatchPayloadSize: accepts a total at or under 50MB', () => {
+  assert.doesNotThrow(() => assertBatchPayloadSize(POSTMARK_MAX_BATCH_PAYLOAD_BYTES, 'sendBatch'));
 });
