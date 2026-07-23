@@ -244,8 +244,8 @@ test('sendEmail: rejects attachment whose content does not match its declared co
     to: 'someone@example.com',
     subject: 'Test',
     textBody: 'Test body',
-    // Valid PNG bytes, but mislabeled as a JPEG — the file-signature check should catch this
-    // regardless of the base64 syntax being perfectly well-formed.
+    // Valid PNG bytes, but mislabeled as a JPEG — the structural validation check should catch
+    // this regardless of the base64 syntax being perfectly well-formed.
     attachments: [{ name: 'photo.jpg', content: TINY_PNG_BASE64, contentType: 'image/jpeg' }],
   });
   assert.ok(isToolError(result), `expected tool error, got: ${JSON.stringify(result)}`);

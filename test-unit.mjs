@@ -367,18 +367,110 @@ test('validateAttachment: omits ContentID when not provided', () => {
   assert.equal('ContentID' in result, false);
 });
 
-// ─── validateAttachment — file signature ──────────────────────────────────────
+// ─── validateAttachment — structural validation ───────────────────────────────
+//
+// TINY_PNG_BASE64 is a real, verified 1x1 truecolor+alpha PNG (70 bytes) —
+// constructed and CRC-validated programmatically (same fixture used in
+// test-offline.mjs), not typed from memory. Its chunk layout is fixed and
+// known: signature 0-7, IHDR chunk 8-32 (data at 16-28), IDAT chunk 33-57
+// (data at 41-53), IEND chunk 58-69.
 
-test('validateAttachment: rejects content whose signature does not match its declared contentType', () => {
+const TINY_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==';
+
+test('validateAttachment: rejects content whose header does not match its declared contentType', () => {
   assert.throws(
     () => validateAttachment({ name: 'a.png', content: 'aGVsbG8=', contentType: 'image/png' }, 'attachments[0]'),
-    /file signature/,
+    /structural validation/,
   );
 });
 
-test('validateAttachment: skips the signature check for contentTypes with no known signature', () => {
+test('validateAttachment: skips the structural check for contentTypes with no known validator', () => {
   assert.doesNotThrow(() =>
     validateAttachment({ name: 'a.raw', content: 'aGVsbG8=', contentType: 'application/octet-stream' }, 'attachments[0]'));
+});
+
+test('validateAttachment: accepts a real structurally-valid PNG', () => {
+  assert.doesNotThrow(() =>
+    validateAttachment({ name: 'pixel.png', content: TINY_PNG_BASE64, contentType: 'image/png' }, 'attachments[0]'));
+});
+
+test('validateAttachment: rejects a PNG with a corrupted body byte even though the header is intact (regression — a header-only check misses exactly this)', () => {
+  const bytes = Buffer.from(TINY_PNG_BASE64, 'base64');
+  bytes[45] ^= 0xff; // flip a byte inside IDAT's data (offset 41-53) — signature/IHDR untouched
+  assert.throws(
+    () => validateAttachment({ name: 'pixel.png', content: bytes.toString('base64'), contentType: 'image/png' }, 'attachments[0]'),
+    /structural validation/,
+  );
+});
+
+test('validateAttachment: rejects a truncated PNG even though the header is intact', () => {
+  const bytes = Buffer.from(TINY_PNG_BASE64, 'base64').subarray(0, 60); // cuts off IEND
+  assert.throws(
+    () => validateAttachment({ name: 'pixel.png', content: bytes.toString('base64'), contentType: 'image/png' }, 'attachments[0]'),
+    /structural validation/,
+  );
+});
+
+test('validateAttachment: accepts a correctly-framed JPEG (SOI...EOI)', () => {
+  const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x00, 0x00, 0xff, 0xd9]);
+  assert.doesNotThrow(() =>
+    validateAttachment({ name: 'a.jpg', content: bytes.toString('base64'), contentType: 'image/jpeg' }, 'attachments[0]'));
+});
+
+test('validateAttachment: rejects a JPEG missing its EOI trailer (truncated)', () => {
+  const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x00, 0x00]);
+  assert.throws(
+    () => validateAttachment({ name: 'a.jpg', content: bytes.toString('base64'), contentType: 'image/jpeg' }, 'attachments[0]'),
+    /structural validation/,
+  );
+});
+
+test('validateAttachment: accepts a correctly-framed GIF (header + trailer byte)', () => {
+  const bytes = Buffer.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x00, 0x00, 0x3b]);
+  assert.doesNotThrow(() =>
+    validateAttachment({ name: 'a.gif', content: bytes.toString('base64'), contentType: 'image/gif' }, 'attachments[0]'));
+});
+
+test('validateAttachment: rejects a GIF missing its trailer byte', () => {
+  const bytes = Buffer.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x00, 0x00]);
+  assert.throws(
+    () => validateAttachment({ name: 'a.gif', content: bytes.toString('base64'), contentType: 'image/gif' }, 'attachments[0]'),
+    /structural validation/,
+  );
+});
+
+test('validateAttachment: accepts a WEBP whose RIFF size matches the actual buffer length', () => {
+  const filler = Buffer.from([0, 0, 0, 0]);
+  const size = Buffer.alloc(4);
+  size.writeUInt32LE(4 + filler.length, 0); // RIFF size = everything after the first 8 bytes
+  const bytes = Buffer.concat([Buffer.from('RIFF', 'ascii'), size, Buffer.from('WEBP', 'ascii'), filler]);
+  assert.doesNotThrow(() =>
+    validateAttachment({ name: 'a.webp', content: bytes.toString('base64'), contentType: 'image/webp' }, 'attachments[0]'));
+});
+
+test('validateAttachment: rejects a WEBP whose declared RIFF size does not match the actual buffer length', () => {
+  const filler = Buffer.from([0, 0, 0, 0]);
+  const size = Buffer.alloc(4);
+  size.writeUInt32LE(4 + filler.length + 100, 0); // deliberately wrong
+  const bytes = Buffer.concat([Buffer.from('RIFF', 'ascii'), size, Buffer.from('WEBP', 'ascii'), filler]);
+  assert.throws(
+    () => validateAttachment({ name: 'a.webp', content: bytes.toString('base64'), contentType: 'image/webp' }, 'attachments[0]'),
+    /structural validation/,
+  );
+});
+
+test('validateAttachment: accepts a PDF with a proper header and %%EOF trailer', () => {
+  const bytes = Buffer.from('%PDF-1.4\n1 0 obj\n<< >>\nendobj\n%%EOF\n', 'ascii');
+  assert.doesNotThrow(() =>
+    validateAttachment({ name: 'a.pdf', content: bytes.toString('base64'), contentType: 'application/pdf' }, 'attachments[0]'));
+});
+
+test('validateAttachment: rejects a PDF missing its %%EOF trailer (truncated)', () => {
+  const bytes = Buffer.from('%PDF-1.4\n1 0 obj\n<< >>\nendobj\n', 'ascii');
+  assert.throws(
+    () => validateAttachment({ name: 'a.pdf', content: bytes.toString('base64'), contentType: 'application/pdf' }, 'attachments[0]'),
+    /structural validation/,
+  );
 });
 
 // ─── validateAttachment — size limits ─────────────────────────────────────────

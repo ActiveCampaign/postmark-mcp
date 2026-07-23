@@ -11,7 +11,7 @@ Send emails with Postmark using Claude and other MCP-compatible AI assistants.
 - Structured JSON logging to stderr with optional log-file persistence; email addresses are partially masked by default
 - HTTPS enforcement and optional domain allowlist for webhook registration
 - Automatic open/click tracking on every send
-- File attachments on every sending tool, with base64/file-signature validation that fails fast on corrupted or mistranscribed data instead of silently sending it
+- File attachments on every sending tool, with base64 and full structural-integrity validation that fails fast on corrupted or mistranscribed data instead of silently sending it
 
 ## Useful Docs
 - [📒 API Documentation](https://postmarkapp.com/developer)
@@ -247,7 +247,7 @@ Subject: Meeting Reminder
 | `contentType` | yes | MIME type, e.g. `"image/png"`, `"application/pdf"` |
 | `contentId` | no | Reference as `cid:<contentId>` inside `htmlBody` to render inline instead of as a downloadable file. Must be unique within the message. |
 
-Before anything is sent, each attachment's `content` is checked for well-formed base64 and — for common image types and PDF — its decoded bytes are checked against the file signature implied by `contentType`. A failed check raises a tool error immediately and **nothing is sent**, so it's always safe to retry with corrected data. This exists specifically to prevent a corrupted or mistranscribed attachment from silently going out as an apparently-successful send.
+Before anything is sent, each attachment's `content` is checked for well-formed base64 and — for common image types and PDF — its decoded bytes go through a full structural-integrity check for that format, not just a header/magic-bytes check: PNG's chunk stream is walked and every chunk's CRC32 is verified; JPEG/GIF require the correct start-of-file marker *and* end-of-file marker; WEBP's declared RIFF size must match the actual data length; PDF must end in `%%EOF`. A header-only check would pass a file that starts correctly but has a corrupted or truncated body — exactly what silent base64 mistranscription tends to produce, since the start of a long string is more likely to survive intact than the middle or end. A failed check raises a tool error immediately and **nothing is sent**, so it's always safe to retry with corrected data.
 
 #### Attachment limits
 
