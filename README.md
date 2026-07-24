@@ -201,6 +201,12 @@ This section provides a complete reference for the Postmark MCP server tools inc
 
 ## Email
 
+> **Confirmation required:** Before invoking any email send tool, the assistant
+> should show the final recipients and subject or template and obtain explicit
+> user confirmation. Corrections, retries, and resends require a new
+> confirmation. Send tools are marked destructive and non-idempotent because an
+> interrupted response does not prove that Postmark rejected the previous send.
+
 ### sendEmail
 Sends a transactional email to one recipient or up to 50 recipients.
 

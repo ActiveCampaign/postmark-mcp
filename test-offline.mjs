@@ -12,7 +12,8 @@
  *   4. All registered tools carry annotation objects
  *   5. Read-only tools carry readOnlyHint: true
  *   6. Mutating tools carry readOnlyHint: false, destructiveHint: false
- *   7. Destructive tools carry destructiveHint: true
+ *   7. Email send tools require confirmation and carry destructiveHint: true
+ *   8. Destructive tools carry destructiveHint: true
  *
  * Run:  node --test test-offline.mjs
  *  or:  npm run test:offline
@@ -232,8 +233,11 @@ const READ_ONLY_TOOLS = [
 ];
 
 const MUTATING_TOOLS = [
-  'sendEmail', 'sendEmailWithTemplate', 'sendBatch', 'sendBatchWithTemplate',
   'createTemplate', 'activateBounce', 'createSuppressions', 'createWebhook',
+];
+
+const EMAIL_SEND_TOOLS = [
+  'sendEmail', 'sendEmailWithTemplate', 'sendBatch', 'sendBatchWithTemplate',
 ];
 
 const DESTRUCTIVE_TOOLS = [
@@ -269,6 +273,20 @@ test('mutating tools have readOnlyHint: false and destructiveHint: false', async
   }
 });
 
+test('email send tools require confirmation and are marked destructive', async () => {
+  const { tools } = await serverNoAllowlist.listTools();
+  const byName = Object.fromEntries(tools.map(t => [t.name, t]));
+  for (const name of EMAIL_SEND_TOOLS) {
+    const tool = byName[name];
+    assert.ok(tool, `tool "${name}" not found in listTools response`);
+    assert.equal(tool.annotations?.readOnlyHint, false, `${name}: readOnlyHint should be false`);
+    assert.equal(tool.annotations?.destructiveHint, true, `${name}: destructiveHint should be true`);
+    assert.equal(tool.annotations?.idempotentHint, false, `${name}: idempotentHint should be false`);
+    assert.match(tool.description, /obtain explicit confirmation/i, `${name}: description should require confirmation`);
+    assert.match(tool.description, /never retry automatically/i, `${name}: description should prohibit automatic retries`);
+  }
+});
+
 test('destructive tools have destructiveHint: true and readOnlyHint: false', async () => {
   const { tools } = await serverNoAllowlist.listTools();
   const byName = Object.fromEntries(tools.map(t => [t.name, t]));
@@ -282,7 +300,12 @@ test('destructive tools have destructiveHint: true and readOnlyHint: false', asy
 
 test('every registered tool belongs to exactly one annotation category', async () => {
   const { tools } = await serverNoAllowlist.listTools();
-  const categorised = new Set([...READ_ONLY_TOOLS, ...MUTATING_TOOLS, ...DESTRUCTIVE_TOOLS]);
+  const categorised = new Set([
+    ...READ_ONLY_TOOLS,
+    ...MUTATING_TOOLS,
+    ...EMAIL_SEND_TOOLS,
+    ...DESTRUCTIVE_TOOLS,
+  ]);
   const uncategorised = tools.filter(t => !categorised.has(t.name)).map(t => t.name);
   assert.deepEqual(
     uncategorised, [],
