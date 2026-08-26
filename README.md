@@ -2,6 +2,15 @@
 
 Send emails with Postmark using Claude and other MCP-compatible AI assistants.
 
+
+<a href="https://youtu.be/eh_uz4U_gxQ?si=oaknma4Afpp5MAme" target="_blank" rel="noopener noreferrer">
+  <img width="834" height="467" alt="Postmark MCP setup video" src="https://github.com/user-attachments/assets/d5bf660b-bf07-4c84-aa5d-db6896cab4c8" />
+</a>
+
+
+
+
+
 ## Features
 - Exposes a Model Context Protocol (MCP) server backed by your [Postmark account](https://account.postmarkapp.com/sign_up)
 - 24 tools spanning email sending (single + batch), templates (CRUD + validation), message search, delivery diagnostics, bounces, suppressions, stats, server info, and webhooks
