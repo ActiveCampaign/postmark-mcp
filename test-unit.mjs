@@ -1,7 +1,11 @@
 /**
- * Unit tests for lib/log.js — maskEmail, sanitizeArgs, writeLog.
+ * Unit tests for lib/log.js (maskEmail, sanitizeArgs, writeLog) and
+ * lib/attachments.js (validateAttachment, assertMessageSize, assertBatchPayloadSize).
  *
  * No Postmark account or server required. All tests run against pure functions.
+ * The attachments tests exercise multi-megabyte inputs directly (no MCP/stdio
+ * round-trip), which is what keeps them fast — see test-offline.mjs for the
+ * end-to-end wiring tests through the actual tool calls.
  *
  * Run:  npm test
  *  or:  node --test test-unit.mjs
@@ -9,10 +13,24 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync, unlinkSync, mkdtempSync } from 'fs';
+import {
+  readFileSync, existsSync, unlinkSync, mkdtempSync,
+  writeFileSync, mkdirSync, rmSync, symlinkSync, realpathSync,
+} from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { createLogger } from './lib/log.js';
+import {
+  fmtBytes,
+  validateAttachment,
+  resolveAttachmentPath,
+  attachmentSchema,
+  assertMessageSize,
+  assertBatchPayloadSize,
+  POSTMARK_MAX_MESSAGE_BYTES,
+  POSTMARK_MAX_BATCH_PAYLOAD_BYTES,
+  FORBIDDEN_ATTACHMENT_EXTENSIONS,
+} from './lib/attachments.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -208,6 +226,35 @@ test('sanitizeArgs: recipients array (sendBatchWithTemplate) summarised correctl
   assert.deepEqual(result.recipients._recipients, ['u**r@example.com', 'a*b@corp.io']);
 });
 
+test('sanitizeArgs: attachment array (content mode) summarised as { _count, names }', () => {
+  const { sanitizeArgs } = masked();
+  const result = sanitizeArgs({
+    attachments: [{ name: 'logo.png', content: 'QQ==', contentType: 'image/png' }],
+  });
+  assert.deepEqual(result.attachments, { _count: 1, names: ['logo.png'] });
+});
+
+test('sanitizeArgs: attachment array (path mode) logs the basename, not the full path', () => {
+  const { sanitizeArgs } = masked();
+  const result = sanitizeArgs({ attachments: [{ path: '/Users/someone/Downloads/logo.png' }] });
+  assert.deepEqual(result.attachments, { _count: 1, names: ['logo.png'] });
+  // The directory layout must not reach the log.
+  assert.equal(JSON.stringify(result).includes('/Users/someone'), false);
+});
+
+test('sanitizeArgs: attachment array never logs base64 content in either mode', () => {
+  const { sanitizeArgs } = masked();
+  const secret = 'QUJDREVGRw==';
+  const result = sanitizeArgs({
+    attachments: [
+      { name: 'a.png', content: secret, contentType: 'image/png' },
+      { path: '/tmp/b.png' },
+    ],
+  });
+  assert.equal(JSON.stringify(result).includes(secret), false);
+  assert.deepEqual(result.attachments, { _count: 2, names: ['a.png', 'b.png'] });
+});
+
 test('sanitizeArgs: emailAddresses primitive array has each email masked', () => {
   const { sanitizeArgs } = masked();
   const result = sanitizeArgs({
@@ -267,4 +314,469 @@ test('writeLog: no LOG_FILE does not create a file', () => {
   const path = join(tmpdir(), `postmark-mcp-should-not-exist-${Date.now()}.log`);
   writeLog({ tool: 'getServerInfo', status: 'ok' });
   assert.equal(existsSync(path), false);
+});
+
+// ─── lib/attachments.js — fmtBytes ─────────────────────────────────────────────
+
+test('fmtBytes: bytes under 1024 shown as a plain count', () => {
+  assert.equal(fmtBytes(512), '512 B');
+});
+
+test('fmtBytes: formats KB/MB/GB with one decimal place', () => {
+  assert.equal(fmtBytes(2048), '2.0 KB');
+  assert.equal(fmtBytes(5 * 1024 * 1024), '5.0 MB');
+  assert.equal(fmtBytes(2 * 1024 * 1024 * 1024), '2.0 GB');
+});
+
+// ─── validateAttachment — forbidden extensions ────────────────────────────────
+
+test('validateAttachment: rejects every documented forbidden extension', () => {
+  for (const ext of FORBIDDEN_ATTACHMENT_EXTENSIONS) {
+    assert.throws(
+      () => validateAttachment({ name: `file.${ext}`, content: 'QQ==', contentType: 'application/octet-stream' }, 'attachments[0]'),
+      /forbidden attachment list/,
+      `expected .${ext} to be rejected`,
+    );
+  }
+});
+
+test('validateAttachment: allows an extension not on the forbidden list', () => {
+  assert.doesNotThrow(() =>
+    validateAttachment({ name: 'file.dat', content: 'QQ==', contentType: 'application/octet-stream' }, 'attachments[0]'));
+});
+
+test('validateAttachment: forbidden-extension match is case-insensitive', () => {
+  assert.throws(
+    () => validateAttachment({ name: 'INSTALLER.EXE', content: 'QQ==', contentType: 'application/octet-stream' }, 'attachments[0]'),
+    /forbidden attachment list/,
+  );
+});
+
+test('validateAttachment: filename with no extension is not treated as forbidden', () => {
+  assert.doesNotThrow(() =>
+    validateAttachment({ name: 'README', content: 'QQ==', contentType: 'text/plain' }, 'attachments[0]'));
+});
+
+// ─── validateAttachment — base64 well-formedness ──────────────────────────────
+
+test('validateAttachment: rejects characters outside the base64 alphabet', () => {
+  assert.throws(
+    () => validateAttachment({ name: 'a.txt', content: 'not-valid-base64!!!', contentType: 'text/plain' }, 'attachments[0]'),
+    /base64 alphabet/,
+  );
+});
+
+test('validateAttachment: rejects length not a multiple of 4', () => {
+  assert.throws(
+    () => validateAttachment({ name: 'a.txt', content: 'QQQ', contentType: 'text/plain' }, 'attachments[0]'),
+    /multiple of 4/,
+  );
+});
+
+test('validateAttachment: rejects non-canonical base64 that decodes leniently but fails to round-trip', () => {
+  // "QR==" decodes to the same single byte as "QQ==" (Node ignores the non-zero
+  // padding bits), but re-encoding that byte canonically produces "QQ==", not
+  // "QR==" — exactly the kind of corruption a naive alphabet/length check misses.
+  assert.throws(
+    () => validateAttachment({ name: 'a.txt', content: 'QR==', contentType: 'text/plain' }, 'attachments[0]'),
+    /round-trip/,
+  );
+});
+
+test('validateAttachment: accepts well-formed base64 and maps to Postmark\'s field names', () => {
+  const result = validateAttachment({ name: 'a.txt', content: 'aGVsbG8=', contentType: 'text/plain' }, 'attachments[0]');
+  assert.equal(result.Name, 'a.txt');
+  assert.equal(result.Content, 'aGVsbG8=');
+  assert.equal(result.ContentType, 'text/plain');
+});
+
+test('validateAttachment: maps contentId to Postmark\'s ContentID field', () => {
+  const result = validateAttachment(
+    { name: 'a.png', content: 'aGVsbG8=', contentType: 'text/plain', contentId: 'logo' }, 'attachments[0]');
+  assert.equal(result.ContentID, 'logo');
+});
+
+test('validateAttachment: omits ContentID when not provided', () => {
+  const result = validateAttachment({ name: 'a.txt', content: 'aGVsbG8=', contentType: 'text/plain' }, 'attachments[0]');
+  assert.equal('ContentID' in result, false);
+});
+
+// ─── validateAttachment — structural validation ───────────────────────────────
+//
+// TINY_PNG_BASE64 is a real, verified 1x1 truecolor+alpha PNG (70 bytes) —
+// constructed and CRC-validated programmatically (same fixture used in
+// test-offline.mjs), not typed from memory. Its chunk layout is fixed and
+// known: signature 0-7, IHDR chunk 8-32 (data at 16-28), IDAT chunk 33-57
+// (data at 41-53), IEND chunk 58-69.
+
+const TINY_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==';
+
+test('validateAttachment: rejects content whose header does not match its declared contentType', () => {
+  assert.throws(
+    () => validateAttachment({ name: 'a.png', content: 'aGVsbG8=', contentType: 'image/png' }, 'attachments[0]'),
+    /structural validation/,
+  );
+});
+
+test('validateAttachment: skips the structural check for contentTypes with no known validator', () => {
+  assert.doesNotThrow(() =>
+    validateAttachment({ name: 'a.raw', content: 'aGVsbG8=', contentType: 'application/octet-stream' }, 'attachments[0]'));
+});
+
+test('validateAttachment: accepts a real structurally-valid PNG', () => {
+  assert.doesNotThrow(() =>
+    validateAttachment({ name: 'pixel.png', content: TINY_PNG_BASE64, contentType: 'image/png' }, 'attachments[0]'));
+});
+
+test('validateAttachment: rejects a PNG with a corrupted body byte even though the header is intact (regression — a header-only check misses exactly this)', () => {
+  const bytes = Buffer.from(TINY_PNG_BASE64, 'base64');
+  bytes[45] ^= 0xff; // flip a byte inside IDAT's data (offset 41-53) — signature/IHDR untouched
+  assert.throws(
+    () => validateAttachment({ name: 'pixel.png', content: bytes.toString('base64'), contentType: 'image/png' }, 'attachments[0]'),
+    /structural validation/,
+  );
+});
+
+test('validateAttachment: rejects a truncated PNG even though the header is intact', () => {
+  const bytes = Buffer.from(TINY_PNG_BASE64, 'base64').subarray(0, 60); // cuts off IEND
+  assert.throws(
+    () => validateAttachment({ name: 'pixel.png', content: bytes.toString('base64'), contentType: 'image/png' }, 'attachments[0]'),
+    /structural validation/,
+  );
+});
+
+test('validateAttachment: accepts a correctly-framed JPEG (SOI...EOI)', () => {
+  const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x00, 0x00, 0xff, 0xd9]);
+  assert.doesNotThrow(() =>
+    validateAttachment({ name: 'a.jpg', content: bytes.toString('base64'), contentType: 'image/jpeg' }, 'attachments[0]'));
+});
+
+test('validateAttachment: rejects a JPEG missing its EOI trailer (truncated)', () => {
+  const bytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x00, 0x00]);
+  assert.throws(
+    () => validateAttachment({ name: 'a.jpg', content: bytes.toString('base64'), contentType: 'image/jpeg' }, 'attachments[0]'),
+    /structural validation/,
+  );
+});
+
+test('validateAttachment: accepts a correctly-framed GIF (header + trailer byte)', () => {
+  const bytes = Buffer.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x00, 0x00, 0x3b]);
+  assert.doesNotThrow(() =>
+    validateAttachment({ name: 'a.gif', content: bytes.toString('base64'), contentType: 'image/gif' }, 'attachments[0]'));
+});
+
+test('validateAttachment: rejects a GIF missing its trailer byte', () => {
+  const bytes = Buffer.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x00, 0x00]);
+  assert.throws(
+    () => validateAttachment({ name: 'a.gif', content: bytes.toString('base64'), contentType: 'image/gif' }, 'attachments[0]'),
+    /structural validation/,
+  );
+});
+
+test('validateAttachment: accepts a WEBP whose RIFF size matches the actual buffer length', () => {
+  const filler = Buffer.from([0, 0, 0, 0]);
+  const size = Buffer.alloc(4);
+  size.writeUInt32LE(4 + filler.length, 0); // RIFF size = everything after the first 8 bytes
+  const bytes = Buffer.concat([Buffer.from('RIFF', 'ascii'), size, Buffer.from('WEBP', 'ascii'), filler]);
+  assert.doesNotThrow(() =>
+    validateAttachment({ name: 'a.webp', content: bytes.toString('base64'), contentType: 'image/webp' }, 'attachments[0]'));
+});
+
+test('validateAttachment: rejects a WEBP whose declared RIFF size does not match the actual buffer length', () => {
+  const filler = Buffer.from([0, 0, 0, 0]);
+  const size = Buffer.alloc(4);
+  size.writeUInt32LE(4 + filler.length + 100, 0); // deliberately wrong
+  const bytes = Buffer.concat([Buffer.from('RIFF', 'ascii'), size, Buffer.from('WEBP', 'ascii'), filler]);
+  assert.throws(
+    () => validateAttachment({ name: 'a.webp', content: bytes.toString('base64'), contentType: 'image/webp' }, 'attachments[0]'),
+    /structural validation/,
+  );
+});
+
+test('validateAttachment: accepts a PDF with a proper header and %%EOF trailer', () => {
+  const bytes = Buffer.from('%PDF-1.4\n1 0 obj\n<< >>\nendobj\n%%EOF\n', 'ascii');
+  assert.doesNotThrow(() =>
+    validateAttachment({ name: 'a.pdf', content: bytes.toString('base64'), contentType: 'application/pdf' }, 'attachments[0]'));
+});
+
+test('validateAttachment: rejects a PDF missing its %%EOF trailer (truncated)', () => {
+  const bytes = Buffer.from('%PDF-1.4\n1 0 obj\n<< >>\nendobj\n', 'ascii');
+  assert.throws(
+    () => validateAttachment({ name: 'a.pdf', content: bytes.toString('base64'), contentType: 'application/pdf' }, 'attachments[0]'),
+    /structural validation/,
+  );
+});
+
+// ─── validateAttachment — size limits ─────────────────────────────────────────
+
+test('validateAttachment: rejects a single attachment whose base64 content alone exceeds 10MB', () => {
+  const oversized = 'A'.repeat(POSTMARK_MAX_MESSAGE_BYTES + 4);
+  assert.throws(
+    () => validateAttachment({ name: 'huge.dat', content: oversized, contentType: 'application/octet-stream' }, 'attachments[0]'),
+    /10 MB/,
+  );
+});
+
+test('validateAttachment: accepts an attachment just under the 10MB ceiling', () => {
+  const justUnder = 'A'.repeat(POSTMARK_MAX_MESSAGE_BYTES - 4);
+  assert.doesNotThrow(() =>
+    validateAttachment({ name: 'ok.dat', content: justUnder, contentType: 'application/octet-stream' }, 'attachments[0]'));
+});
+
+// ─── assertMessageSize ─────────────────────────────────────────────────────────
+
+test('assertMessageSize: rejects textBody over 5MB', () => {
+  assert.throws(
+    () => assertMessageSize({ label: 'test', textBody: 'x'.repeat(5 * 1024 * 1024 + 1) }),
+    /5 MB/,
+  );
+});
+
+test('assertMessageSize: rejects htmlBody over 5MB', () => {
+  assert.throws(
+    () => assertMessageSize({ label: 'test', htmlBody: 'x'.repeat(5 * 1024 * 1024 + 1) }),
+    /5 MB/,
+  );
+});
+
+test('assertMessageSize: rejects combined body+attachments over 10MB even when each part alone is under its own limit', () => {
+  assert.throws(
+    () => assertMessageSize({ label: 'test', textBody: 'x'.repeat(4 * 1024 * 1024), attachmentBytes: 7 * 1024 * 1024 }),
+    /10 MB total/,
+  );
+});
+
+test('assertMessageSize: accepts a message comfortably under all limits', () => {
+  assert.doesNotThrow(() =>
+    assertMessageSize({ label: 'test', textBody: 'hello', htmlBody: '<p>hi</p>', attachmentBytes: 1024 }));
+});
+
+test('assertMessageSize: skips body checks entirely when textBody/htmlBody are omitted (template sends)', () => {
+  assert.doesNotThrow(() => assertMessageSize({ label: 'test', attachmentBytes: 1024 }));
+});
+
+// ─── assertBatchPayloadSize ────────────────────────────────────────────────────
+
+test('assertBatchPayloadSize: rejects a total over 50MB', () => {
+  assert.throws(
+    () => assertBatchPayloadSize(POSTMARK_MAX_BATCH_PAYLOAD_BYTES + 1, 'sendBatch'),
+    /50 MB/,
+  );
+});
+
+test('assertBatchPayloadSize: accepts a total at or under 50MB', () => {
+  assert.doesNotThrow(() => assertBatchPayloadSize(POSTMARK_MAX_BATCH_PAYLOAD_BYTES, 'sendBatch'));
+});
+
+// ─── validateAttachment — `path` input mode ───────────────────────────────────
+//
+// `path` exists because MCP has no way for a client to hand a server the bytes
+// of a user-uploaded file (tool arguments are JSON only; image content blocks
+// are result-side). The only alternative is a model emitting base64 into the
+// tool call, which truncates or fabricates for anything non-trivial. These
+// tests cover reading from disk, inference, and the allowlist guard.
+
+const withTempDir = (fn) => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'postmark-mcp-att-')));
+  try { return fn(dir); } finally { rmSync(dir, { recursive: true, force: true }); }
+};
+
+test('validateAttachment: path reads the file and infers name + contentType from the extension', () => {
+  withTempDir((dir) => {
+    const file = join(dir, 'pixel.png');
+    writeFileSync(file, Buffer.from(TINY_PNG_BASE64, 'base64'));
+    const result = validateAttachment({ path: file }, 'attachments[0]');
+    assert.equal(result.Name, 'pixel.png');
+    assert.equal(result.ContentType, 'image/png');
+    assert.equal(result.Content, TINY_PNG_BASE64);
+  });
+});
+
+test('validateAttachment: path with explicit name/contentType uses those instead of the inferred ones', () => {
+  withTempDir((dir) => {
+    const file = join(dir, 'pixel.png');
+    writeFileSync(file, Buffer.from(TINY_PNG_BASE64, 'base64'));
+    const result = validateAttachment(
+      { path: file, name: 'logo.png', contentType: 'image/png' }, 'attachments[0]');
+    assert.equal(result.Name, 'logo.png');
+    assert.equal(result.ContentType, 'image/png');
+  });
+});
+
+test('validateAttachment: path to an unknown extension falls back to application/octet-stream', () => {
+  withTempDir((dir) => {
+    const file = join(dir, 'data.zzz');
+    writeFileSync(file, 'hello');
+    assert.equal(validateAttachment({ path: file }, 'attachments[0]').ContentType, 'application/octet-stream');
+  });
+});
+
+test('validateAttachment: missing file gives an error that tells the model to ask for a saved file', () => {
+  assert.throws(
+    () => validateAttachment({ path: '/nonexistent/nope.png' }, 'attachments[0]'),
+    /no file exists at .* save it to a file first/s,
+  );
+});
+
+test('validateAttachment: a caller-sandbox path is diagnosed as a filesystem mismatch, not a missing file', () => {
+  // The file genuinely exists for the caller — it just lives in the caller's
+  // own container, not on the machine running this server. A plain "not found"
+  // sends the model hunting for a typo instead of asking for a real path.
+  assert.throws(
+    () => validateAttachment({ path: '/mnt/user-data/uploads/logo.png' }, 'attachments[0]'),
+    /different filesystem from the one this MCP server reads/,
+  );
+});
+
+test('validateAttachment: sandbox diagnosis names the server working directory and warns off base64', () => {
+  try {
+    validateAttachment({ path: '/mnt/user-data/uploads/logo.png' }, 'attachments[0]');
+    assert.fail('expected a throw');
+  } catch (e) {
+    assert.ok(e.message.includes(process.cwd()), 'should state where the server actually reads from');
+    assert.match(e.message, /do not fall back to pasting base64/);
+  }
+});
+
+test('validateAttachment: path pointing at a directory is rejected', () => {
+  withTempDir((dir) => {
+    assert.throws(() => validateAttachment({ path: dir }, 'attachments[0]'), /not a regular file/);
+  });
+});
+
+test('validateAttachment: forbidden extension is still rejected when supplied via path', () => {
+  withTempDir((dir) => {
+    const file = join(dir, 'installer.exe');
+    writeFileSync(file, 'MZ');
+    assert.throws(() => validateAttachment({ path: file }, 'attachments[0]'), /forbidden attachment list/);
+  });
+});
+
+test('validateAttachment: structural validation still runs on a corrupt file read from disk', () => {
+  withTempDir((dir) => {
+    const bytes = Buffer.from(TINY_PNG_BASE64, 'base64');
+    bytes[45] ^= 0xff; // corrupt IDAT body, leave the signature intact
+    const file = join(dir, 'broken.png');
+    writeFileSync(file, bytes);
+    assert.throws(
+      () => validateAttachment({ path: file }, 'attachments[0]'),
+      /fails structural validation.*appears to be corrupt/s,
+    );
+  });
+});
+
+test('validateAttachment: an empty file on disk is reported as empty, not as bad base64', () => {
+  withTempDir((dir) => {
+    const file = join(dir, 'empty.txt');
+    writeFileSync(file, '');
+    assert.throws(() => validateAttachment({ path: file }, 'attachments[0]'), /the file on disk is empty/);
+  });
+});
+
+test('validateAttachment: a file too large to fit under 10MB once base64-encoded is rejected before it is read', () => {
+  withTempDir((dir) => {
+    const file = join(dir, 'huge.bin');
+    writeFileSync(file, Buffer.alloc(8 * 1024 * 1024)); // 8MB raw -> ~10.7MB base64
+    assert.throws(
+      () => validateAttachment({ path: file }, 'attachments[0]'),
+      /once base64-encoded — over Postmark's 10 MB total message limit/,
+    );
+  });
+});
+
+// ─── POSTMARK_ATTACHMENT_DIR allowlist ────────────────────────────────────────
+
+const withAttachmentDir = (dir, fn) => {
+  const prev = process.env.POSTMARK_ATTACHMENT_DIR;
+  process.env.POSTMARK_ATTACHMENT_DIR = dir;
+  try { return fn(); } finally {
+    if (prev === undefined) delete process.env.POSTMARK_ATTACHMENT_DIR;
+    else process.env.POSTMARK_ATTACHMENT_DIR = prev;
+  }
+};
+
+test('resolveAttachmentPath: allows a file inside POSTMARK_ATTACHMENT_DIR', () => {
+  withTempDir((dir) => {
+    const file = join(dir, 'ok.txt');
+    writeFileSync(file, 'hi');
+    withAttachmentDir(dir, () => {
+      assert.equal(resolveAttachmentPath(file), file);
+    });
+  });
+});
+
+test('resolveAttachmentPath: rejects a file outside POSTMARK_ATTACHMENT_DIR', () => {
+  withTempDir((allowed) => {
+    withTempDir((other) => {
+      const outside = join(other, 'secret.txt');
+      writeFileSync(outside, 'nope');
+      withAttachmentDir(allowed, () => {
+        assert.throws(() => resolveAttachmentPath(outside), /outside POSTMARK_ATTACHMENT_DIR/);
+      });
+    });
+  });
+});
+
+test('resolveAttachmentPath: rejects traversal out of POSTMARK_ATTACHMENT_DIR', () => {
+  withTempDir((allowed) => {
+    const nested = join(allowed, 'nested');
+    mkdirSync(nested);
+    writeFileSync(join(allowed, 'escaped.txt'), 'nope');
+    withAttachmentDir(nested, () => {
+      assert.throws(() => resolveAttachmentPath(join(nested, '..', 'escaped.txt')), /outside POSTMARK_ATTACHMENT_DIR/);
+    });
+  });
+});
+
+test('resolveAttachmentPath: a symlink inside the allowed dir cannot escape it', () => {
+  withTempDir((allowed) => {
+    withTempDir((other) => {
+      const target = join(other, 'secret.txt');
+      writeFileSync(target, 'nope');
+      const link = join(allowed, 'innocent.txt');
+      symlinkSync(target, link);
+      withAttachmentDir(allowed, () => {
+        assert.throws(() => resolveAttachmentPath(link), /outside POSTMARK_ATTACHMENT_DIR/);
+      });
+    });
+  });
+});
+
+test('resolveAttachmentPath: no allowlist set means any readable file resolves', () => {
+  withTempDir((dir) => {
+    const file = join(dir, 'anywhere.txt');
+    writeFileSync(file, 'hi');
+    assert.equal(process.env.POSTMARK_ATTACHMENT_DIR, undefined);
+    assert.equal(resolveAttachmentPath(file), file);
+  });
+});
+
+// ─── attachmentSchema — path/content exclusivity ──────────────────────────────
+
+test('attachmentSchema: accepts `path` alone (name and contentType are inferred)', () => {
+  assert.equal(attachmentSchema.safeParse({ path: './logo.png' }).success, true);
+});
+
+test('attachmentSchema: rejects both `path` and `content`', () => {
+  const r = attachmentSchema.safeParse({ path: './a.png', content: 'QQ==', name: 'a.png', contentType: 'image/png' });
+  assert.equal(r.success, false);
+  assert.match(r.error.issues[0].message, /not both/);
+});
+
+test('attachmentSchema: rejects an attachment with neither `path` nor `content`', () => {
+  const r = attachmentSchema.safeParse({ name: 'a.png', contentType: 'image/png' });
+  assert.equal(r.success, false);
+  assert.match(r.error.issues[0].message, /either `path`.*or `content`/);
+});
+
+test('attachmentSchema: `content` without `contentType` points the model at `path` (the attempt-2 failure)', () => {
+  const r = attachmentSchema.safeParse({ content: 'QQ==', name: 'a.png' });
+  assert.equal(r.success, false);
+  assert.match(r.error.issues.find(i => i.path.includes('contentType')).message, /cut short.*use `path` instead/);
+});
+
+test('attachmentSchema: `content` without `name` is rejected', () => {
+  const r = attachmentSchema.safeParse({ content: 'QQ==', contentType: 'image/png' });
+  assert.equal(r.success, false);
+  assert.match(r.error.issues.find(i => i.path.includes('name')).message, /`name` is required/);
 });

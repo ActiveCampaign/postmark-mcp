@@ -219,6 +219,99 @@ test('createWebhook: rejects subdomain suffix bypass (S1 regression)', async () 
   }
 });
 
+// ─── Attachment validation ──────────────────────────────────────────────────────
+//
+// TINY_PNG_BASE64 is a real, verified 1x1 truecolor+alpha PNG (70 bytes) —
+// constructed and CRC-validated programmatically, not typed from memory, so
+// these tests exercise genuine base64/signature validation rather than a
+// string that merely looks plausible.
+
+const TINY_PNG_BASE64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==';
+
+test('sendEmail: rejects attachment with invalid base64 characters', async () => {
+  const result = await callTool(serverNoAllowlist, 'sendEmail', {
+    to: 'someone@example.com',
+    subject: 'Test',
+    textBody: 'Test body',
+    attachments: [{ name: 'bad.png', content: 'not-valid-base64!!!', contentType: 'image/png' }],
+  });
+  assert.ok(isToolError(result), `expected tool error, got: ${JSON.stringify(result)}`);
+  assert.match(errorText(result), /base64/i);
+});
+
+test('sendEmail: rejects attachment whose content does not match its declared contentType', async () => {
+  const result = await callTool(serverNoAllowlist, 'sendEmail', {
+    to: 'someone@example.com',
+    subject: 'Test',
+    textBody: 'Test body',
+    // Valid PNG bytes, but mislabeled as a JPEG — the structural validation check should catch
+    // this regardless of the base64 syntax being perfectly well-formed.
+    attachments: [{ name: 'photo.jpg', content: TINY_PNG_BASE64, contentType: 'image/jpeg' }],
+  });
+  assert.ok(isToolError(result), `expected tool error, got: ${JSON.stringify(result)}`);
+  assert.match(errorText(result), /signature/i);
+});
+
+test('sendEmail: rejects attachment truncated after encoding (simulates a mangled transcription)', async () => {
+  const result = await callTool(serverNoAllowlist, 'sendEmail', {
+    to: 'someone@example.com',
+    subject: 'Test',
+    textBody: 'Test body',
+    attachments: [{ name: 'pixel.png', content: TINY_PNG_BASE64.slice(0, -10), contentType: 'image/png' }],
+  });
+  assert.ok(isToolError(result), `expected tool error, got: ${JSON.stringify(result)}`);
+  assert.match(errorText(result), /base64|signature/i);
+});
+
+test('sendEmail: accepts a valid small PNG attachment (passes local validation)', async () => {
+  const result = await callTool(serverNoAllowlist, 'sendEmail', {
+    to: 'someone@example.com',
+    subject: 'Test',
+    textBody: 'Test body',
+    attachments: [{ name: 'pixel.png', content: TINY_PNG_BASE64, contentType: 'image/png' }],
+  });
+  // Either Postmark's test API accepted it, or it returned an API-level error —
+  // both mean our local base64/signature validation passed. A validation error
+  // from our own code would mention "base64" or "signature" and never reach Postmark.
+  if (isToolError(result)) {
+    const text = errorText(result);
+    assert.ok(
+      !/base64|signature/i.test(text),
+      `local attachment validation should have passed, but got: ${text}`,
+    );
+  }
+});
+
+test('sendEmail: rejects a forbidden attachment file extension regardless of content', async () => {
+  const result = await callTool(serverNoAllowlist, 'sendEmail', {
+    to: 'someone@example.com',
+    subject: 'Test',
+    textBody: 'Test body',
+    attachments: [{ name: 'installer.exe', content: 'QQ==', contentType: 'application/octet-stream' }],
+  });
+  assert.ok(isToolError(result), `expected tool error, got: ${JSON.stringify(result)}`);
+  assert.match(errorText(result), /forbidden/i);
+});
+
+// Size-limit math (5MB/10MB/50MB thresholds) is covered directly and cheaply
+// in test-unit.mjs against lib/attachments.js — driving a multi-megabyte
+// payload through a real MCP/stdio round-trip here would work identically
+// but take tens of seconds instead of milliseconds for no added confidence.
+
+test('sendBatch: rejects a corrupted attachment on one message before any send reaches Postmark', async () => {
+  const result = await callTool(serverNoAllowlist, 'sendBatch', {
+    messages: [
+      {
+        to: 'someone@example.com', subject: 'Test 1', textBody: 'Body 1',
+        attachments: [{ name: 'bad.png', content: 'not-valid-base64!!!', contentType: 'image/png' }],
+      },
+      { to: 'someone-else@example.com', subject: 'Test 2', textBody: 'Body 2' },
+    ],
+  });
+  assert.ok(isToolError(result), `expected tool error, got: ${JSON.stringify(result)}`);
+  assert.match(errorText(result), /messages\[0\]\.attachments\[0\]/);
+});
+
 // ─── Tool annotations ─────────────────────────────────────────────────────────
 //
 // Verifies that every tool has an annotations object and that the
