@@ -65,6 +65,11 @@ function isAllowedWebhookUrl(url, allowlist) {
 const READ_ONLY  = { readOnlyHint: true,  destructiveHint: false, idempotentHint: true,  openWorldHint: true };
 const MUTATING   = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
 const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true,  idempotentHint: false, openWorldHint: true };
+const EMAIL_SEND = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true };
+
+const EMAIL_CONFIRMATION_INSTRUCTION =
+  "Before every invocation, show the user the final recipients and subject or template, then obtain explicit confirmation. " +
+  "A correction, retry, or resend requires a new confirmation. Never retry automatically, because Postmark may have accepted the previous request even when its response was interrupted or ambiguous.";
 
 /**
  * Minimal hardened HTTP client for the Postmark REST API over native fetch.
@@ -440,7 +445,7 @@ function registerTools(server) {
 
   server.tool(
     "sendEmail",
-    "Send a single transactional email via Postmark. Accepts one recipient or an array of up to 50. The From address must be a verified sender signature. Open and link tracking are enabled automatically. Use sendBatch to send multiple distinct messages in one call.",
+    `${EMAIL_CONFIRMATION_INSTRUCTION} Send a single transactional email via Postmark. Accepts one recipient or an array of up to 50. The From address must be a verified sender signature. Open and link tracking are enabled automatically. Use sendBatch to send multiple distinct messages in one call.`,
     {
       to: z.union([
         z.string().email(),
@@ -455,7 +460,7 @@ function registerTools(server) {
       replyTo: z.string().email().optional().describe("Reply-To address (optional)"),
       tag: z.string().optional().describe("Optional tag for categorization")
     },
-    MUTATING,
+    EMAIL_SEND,
     async ({ to, subject, textBody, htmlBody, from, cc, bcc, replyTo, tag }) => {
       const emailData = {
         From: from || defaultSender,
@@ -490,7 +495,7 @@ function registerTools(server) {
 
   server.tool(
     "sendEmailWithTemplate",
-    "Send a single email rendered from a saved Postmark template. Supply either templateId (numeric) or templateAlias (string) plus a templateModel object that provides the template variables. The From address must be a verified sender signature.",
+    `${EMAIL_CONFIRMATION_INSTRUCTION} Send a single email rendered from a saved Postmark template. Supply either templateId (numeric) or templateAlias (string) plus a templateModel object that provides the template variables. The From address must be a verified sender signature.`,
     {
       to: z.string().email().describe("Recipient email address"),
       templateId: z.number().optional().describe("Template ID — provide either this or templateAlias, not both"),
@@ -502,7 +507,7 @@ function registerTools(server) {
       replyTo: z.string().email().optional().describe("Reply-To address (optional)"),
       tag: z.string().optional().describe("Optional tag for categorization")
     },
-    MUTATING,
+    EMAIL_SEND,
     async ({ to, templateId, templateAlias, templateModel, from, cc, bcc, replyTo, tag }) => {
       if (!templateId && !templateAlias) {
         throw new Error("Either templateId or templateAlias must be provided");
@@ -580,7 +585,7 @@ function registerTools(server) {
 
   server.tool(
     "sendBatch",
-    "Send up to 500 independent emails in a single synchronous Postmark API call (POST /email/batch). Each message has its own recipient, subject, and body. Returns per-message results — the overall HTTP call succeeds even when individual messages fail. Use sendEmail for a single message.",
+    `${EMAIL_CONFIRMATION_INSTRUCTION} Send up to 500 independent emails in a single synchronous Postmark API call (POST /email/batch). Each message has its own recipient, subject, and body. Returns per-message results — the overall HTTP call succeeds even when individual messages fail. Use sendEmail for a single message.`,
     {
       messages: z.array(z.object({
         to: z.string().email().describe("Recipient email address"),
@@ -594,7 +599,7 @@ function registerTools(server) {
         tag: z.string().optional().describe("Tag for categorization")
       })).min(1).max(500).describe("Up to 500 messages to send in a single request")
     },
-    MUTATING,
+    EMAIL_SEND,
     async ({ messages }) => {
       const payload = messages.map(m => {
         const msg = {
@@ -625,7 +630,7 @@ function registerTools(server) {
 
   server.tool(
     "sendBatchWithTemplate",
-    "Send the same Postmark template to up to 500 recipients in a single call, with per-recipient template models (POST /email/batchWithTemplates). Supply either templateId or templateAlias. Returns per-message results. Use sendEmailWithTemplate for a single recipient.",
+    `${EMAIL_CONFIRMATION_INSTRUCTION} Send the same Postmark template to up to 500 recipients in a single call, with per-recipient template models (POST /email/batchWithTemplates). Supply either templateId or templateAlias. Returns per-message results. Use sendEmailWithTemplate for a single recipient.`,
     {
       templateId: z.number().int().optional().describe("Template ID (use either this or templateAlias)"),
       templateAlias: z.string().optional().describe("Template alias (use either this or templateId)"),
@@ -641,7 +646,7 @@ function registerTools(server) {
         tag: z.string().optional().describe("Override tag for this recipient")
       })).min(1).max(500).describe("Up to 500 recipients, each with their own template model")
     },
-    MUTATING,
+    EMAIL_SEND,
     async ({ templateId, templateAlias, from, tag, recipients }) => {
       if (!templateId && !templateAlias) {
         throw new Error("Either templateId or templateAlias must be provided");
