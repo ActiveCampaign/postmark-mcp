@@ -289,3 +289,58 @@ test('every registered tool belongs to exactly one annotation category', async (
     `these tools are not covered by the annotation test lists: ${uncategorised.join(', ')}`,
   );
 });
+
+// ─── Account mode ─────────────────────────────────────────────────────────────
+//
+// POSTMARK_ACCOUNT_TOKEN toggles account mode. These tests assert tool
+// registration and schema shape only; POSTMARK_SKIP_VERIFY keeps startup offline,
+// so no account API call is made. Live routing is covered by test-e2e.mjs.
+
+const ACCOUNT_TOOLS = [
+  'listServers', 'createServer', 'editServer', 'deleteServer',
+  'listDomains', 'getDomain', 'createDomain', 'verifyDomainDkim', 'verifyDomainReturnPath', 'deleteDomain',
+  'listSenders', 'getSender', 'createSender', 'resendSenderConfirmation', 'deleteSender',
+];
+
+const toolNames = list => list.tools.map(t => t.name);
+const findTool = (list, name) => list.tools.find(t => t.name === name);
+const hasServerArg = tool => Object.prototype.hasOwnProperty.call(tool.inputSchema?.properties ?? {}, 'server');
+
+test('server-only mode: no account tools and no `server` argument', async () => {
+  const list = await serverNoAllowlist.listTools();
+  for (const name of ACCOUNT_TOOLS) {
+    assert.ok(!toolNames(list).includes(name), `${name} should not be registered without POSTMARK_ACCOUNT_TOKEN`);
+  }
+  assert.ok(!hasServerArg(findTool(list, 'sendEmail')), 'sendEmail should not carry a server argument in server-only mode');
+  assert.ok(!hasServerArg(findTool(list, 'getServerInfo')), 'getServerInfo should not carry a server argument in server-only mode');
+});
+
+test('account mode: registers the account tools and adds an optional `server` argument', async () => {
+  const client = await startServer({ POSTMARK_ACCOUNT_TOKEN: 'POSTMARK_API_TEST', POSTMARK_DEFAULT_SERVER: 'test' });
+  try {
+    const list = await client.listTools();
+    for (const name of ACCOUNT_TOOLS) {
+      assert.ok(toolNames(list).includes(name), `${name} should be registered in account mode`);
+    }
+    const sendEmail = findTool(list, 'sendEmail');
+    assert.ok(hasServerArg(sendEmail), 'sendEmail should carry a server argument in account mode');
+    assert.ok(!(sendEmail.inputSchema.required ?? []).includes('server'), 'the server argument must be optional');
+    for (const name of ['listServers', 'createServer', 'listDomains']) {
+      assert.ok(!hasServerArg(findTool(list, name)), `account tool ${name} should not carry a server argument`);
+    }
+  } finally {
+    await client.close();
+  }
+});
+
+test('account mode: destructive account tools carry destructiveHint: true', async () => {
+  const client = await startServer({ POSTMARK_ACCOUNT_TOKEN: 'POSTMARK_API_TEST', POSTMARK_DEFAULT_SERVER: 'test' });
+  try {
+    const list = await client.listTools();
+    for (const name of ['deleteServer', 'deleteDomain', 'deleteSender']) {
+      assert.equal(findTool(list, name).annotations?.destructiveHint, true, `${name}: destructiveHint should be true`);
+    }
+  } finally {
+    await client.close();
+  }
+});

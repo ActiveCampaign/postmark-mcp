@@ -72,7 +72,7 @@ Edit your `.env` to contain your Postmark credentials and settings.
 
 | Variable | Description |
 |---|---|
-| `POSTMARK_SERVER_TOKEN` | Your Postmark server API token |
+| `POSTMARK_SERVER_TOKEN` | Your Postmark server API token. Required unless `POSTMARK_ACCOUNT_TOKEN` is set (see [Account mode](#account-mode)). |
 | `DEFAULT_SENDER_EMAIL` | Default sender email address (must be a verified sender in Postmark) |
 | `DEFAULT_MESSAGE_STREAM` | Postmark message stream (e.g., `outbound`) |
 
@@ -80,10 +80,46 @@ Edit your `.env` to contain your Postmark credentials and settings.
 
 | Variable | Default | Description |
 |---|---|---|
+| `POSTMARK_ACCOUNT_TOKEN` | — | Enables [account mode](#account-mode): account-level tools (servers, domains, sender signatures) and per-call server routing across the whole account. Off when unset. |
+| `POSTMARK_DEFAULT_SERVER` | — | Account mode only. Name or numeric ID of the server used by server-scoped tools when no `server` argument is given. `POSTMARK_SERVER_TOKEN` takes precedence when both are set. Not a secret. |
 | `AGENT_LABEL` | — | A label for this instance (e.g., `prod`, `staging`). Sent as `X-Agent-Label` on every Postmark API request, useful for identifying traffic sources in logs or support tickets. |
 | `WEBHOOK_URL_ALLOWLIST` | — | Comma-separated list of HTTPS URL prefixes that `createWebhook` will accept (e.g., `https://hooks.yourapp.com,https://inbound.corp.io`). When unset, any valid HTTPS URL is accepted. |
 | `LOG_FILE` | — | Path to a file where structured JSON logs are appended in addition to stderr. The file is created if it does not exist. No rotation or size cap is applied — use an external tool such as `logrotate` to manage the file in long-running deployments. |
 | `LOG_EMAIL_FULL` | `false` | Set to `true` to log email addresses without masking. By default the mailbox portion is partially masked in logs (`u**r@example.com`). |
+
+### Account mode
+
+By default the server is scoped to one Postmark server via `POSTMARK_SERVER_TOKEN`. Setting `POSTMARK_ACCOUNT_TOKEN` (a Postmark **account** token) turns on account mode, which adds two capabilities:
+
+1. **Account-level tools** for managing servers, sending domains, and sender signatures (see [Account tools](#account-tools)).
+2. **Per-call server routing.** Every server-scoped tool gains an optional `server` argument (numeric ID or exact name). A single connection can then act on any server in the account instead of one.
+
+Server token selection for server-scoped tools follows this order:
+
+1. An explicit `server` argument on the call.
+2. `POSTMARK_SERVER_TOKEN`, if set.
+3. The server named by `POSTMARK_DEFAULT_SERVER`, resolved through the account token at startup.
+
+If none of these yields a token, server-scoped tools return an error asking for a `server` argument or a default; account tools are unaffected.
+
+The account and server tokens are distinct Postmark credential types and are not interchangeable. Server API tokens are resolved from the account internally and never appear in tool output or logs.
+
+```json
+{
+  "mcpServers": {
+    "postmark": {
+      "command": "npx",
+      "args": ["-y", "@activecampaign/postmark-mcp"],
+      "env": {
+        "POSTMARK_ACCOUNT_TOKEN": "your-postmark-account-token",
+        "POSTMARK_DEFAULT_SERVER": "your-primary-server-name",
+        "DEFAULT_SENDER_EMAIL": "sender@yourdomain.com",
+        "DEFAULT_MESSAGE_STREAM": "outbound"
+      }
+    }
+  }
+}
+```
 
 **Run the server:**
 
@@ -170,7 +206,7 @@ Install directly from npm without managing a local copy:
 Both snippets work with **Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`), **Cursor** (`.cursor/mcp.json`), and any other MCP client that accepts the standard JSON configuration format.
 
 ## Tools
-This section provides a complete reference for the Postmark MCP server tools including example prompts and payloads. The server registers **24 tools** organized into eight categories.
+This section provides a complete reference for the Postmark MCP server tools including example prompts and payloads. The server registers **24 tools** organized into eight categories. In [account mode](#account-mode) each of these tools also accepts an optional `server` argument (numeric ID or exact name) to target a specific server, and 15 additional [account tools](#account-tools) are registered.
 
 ### Table of Contents
 - [Email](#email)
@@ -655,6 +691,34 @@ Deletes a webhook by ID.
 
 **Payload:** `{ "webhookId": 1234567 }`
 
+## Account Tools
+
+Registered only in [account mode](#account-mode) (`POSTMARK_ACCOUNT_TOKEN` set). These operate at the account level and do not take a `server` argument. Server API tokens are never included in their output.
+
+### Servers
+
+- **listServers** — List servers in the account (name, ID, color, delivery type). Optional `name`, `count`, `offset` filters. `{}`
+- **createServer** — Create a server. Set `deliveryType: "Sandbox"` for a server that accepts mail without delivering it. `{ "name": "prod-transactional", "color": "Blue", "trackOpens": true }`
+- **editServer** — Update a server by ID; at least one field required. `{ "serverId": 1234567, "name": "prod-transactional" }`
+- **deleteServer** — Permanently delete a server by ID. Not enabled for all accounts; Postmark's error is surfaced verbatim if unavailable. `{ "serverId": 1234567 }`
+
+### Domains
+
+- **listDomains** — List sending domains with SPF/DKIM/return-path status. `{}`
+- **getDomain** — Full domain detail including the DKIM and return-path DNS records to publish. `{ "domainId": 1234567 }`
+- **createDomain** — Create a sending domain. `{ "name": "example.com", "returnPathDomain": "pm-bounces.example.com" }`
+- **verifyDomainDkim** — Re-check the domain's DKIM DNS record. `{ "domainId": 1234567 }`
+- **verifyDomainReturnPath** — Re-check the domain's return-path CNAME. `{ "domainId": 1234567 }`
+- **deleteDomain** — Permanently delete a domain by ID. `{ "domainId": 1234567 }`
+
+### Sender signatures
+
+- **listSenders** — List sender signatures (email, ID, confirmation status). `{}`
+- **getSender** — Full signature detail by ID. `{ "signatureId": 1234567 }`
+- **createSender** — Register a From address; Postmark sends a confirmation email. `{ "fromEmail": "team@example.com", "name": "Example Team" }`
+- **resendSenderConfirmation** — Resend the confirmation email for an unconfirmed signature. `{ "signatureId": 1234567 }`
+- **deleteSender** — Permanently delete a sender signature by ID. `{ "signatureId": 1234567 }`
+
 ## Implementation Details
 ### API Request Headers
 All requests to the Postmark API include the following headers for client identification:
@@ -729,6 +793,9 @@ Postmark has [two token types](https://postmarkapp.com/developer/api/overview#au
 - Create a **dedicated Postmark server** used exclusively for MCP traffic. A compromise is then limited to that server's data and settings rather than your entire account.
 - Configure that server with only the message streams and verified sender signatures it actually needs.
 - Rotate the token if it is ever exposed.
+
+### Account mode scope
+[Account mode](#account-mode) is opt-in and off unless `POSTMARK_ACCOUNT_TOKEN` is set. When enabled it widens scope: the account token can reach every server in the account and manage servers, domains, and sender signatures, and it adds 15 account tools on top of the 24 server-scoped ones. Treat the account token as a higher-privilege credential than a server token, and enable account mode only when the account-level reach is needed. Server API tokens the account token can read are used only to fulfil server-scoped calls; they are never returned by a tool or written to logs. The dedicated-server mitigation above does not apply to an account token, which by definition reaches every server, so the per-tool approval and prompt-injection mitigations below matter more in account mode, especially for the destructive `deleteServer`, `deleteDomain`, and `deleteSender` tools.
 
 ### Tool blast radius
 The 24 tools include several high-impact operations. Below is the breakdown by risk level:
