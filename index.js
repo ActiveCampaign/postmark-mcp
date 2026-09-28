@@ -10,6 +10,7 @@
 import 'dotenv/config';
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { z } from "zod";
 import { createRequire } from 'module';
 import { createLogger } from './lib/log.js';
@@ -18,11 +19,42 @@ const require = createRequire(import.meta.url);
 const { version: clientVersion } = require('./package.json');
 const POSTMARK_API_BASE = 'https://api.postmarkapp.com';
 const REQUEST_TIMEOUT_MS = 60_000;
+// Page size for the internal server-token resolver's /servers walk. Set to the API
+// maximum for the fewest round trips; the listServers tool defaults to 100 for
+// readable output, which is a separate concern.
+const SERVERS_PAGE_SIZE = 500;
 
 const serverToken = process.env.POSTMARK_SERVER_TOKEN;
 const defaultSender = process.env.DEFAULT_SENDER_EMAIL;
 const defaultMessageStream = process.env.DEFAULT_MESSAGE_STREAM;
 const agentLabel = process.env.AGENT_LABEL || null;
+
+// Account mode is opt-in. When POSTMARK_ACCOUNT_TOKEN is set the server can reach
+// account-level endpoints (servers, domains, sender signatures) and route any
+// server-scoped tool at a chosen server via the optional `server` argument. When
+// it is unset the server behaves exactly as before: server-scoped only, no `server`
+// argument, no account tools.
+const accountToken = process.env.POSTMARK_ACCOUNT_TOKEN || null;
+
+// Name or numeric id of the server whose token backs server-scoped tools when no
+// `server` argument is given. Only consulted in account mode; not a secret.
+const defaultServerRef = process.env.POSTMARK_DEFAULT_SERVER || null;
+
+// Token used for server-scoped tools when no `server` argument is given. Seeded
+// from POSTMARK_SERVER_TOKEN and, in account mode, resolved from POSTMARK_DEFAULT_SERVER
+// at startup.
+let defaultServerToken = serverToken || null;
+
+// Per-invocation server-token override, set by the tool wrapper and read by
+// postmarkRequest. AsyncLocalStorage keeps concurrent tool calls isolated: a
+// module-level variable would let parallel calls clobber each other's target server.
+const requestContext = new AsyncLocalStorage();
+
+// Optional `server` argument spread into every server-scoped tool schema in account
+// mode. Empty otherwise, so server-only mode keeps its original schemas verbatim.
+const SERVER_SCOPE = accountToken
+  ? { server: z.union([z.number().int(), z.string()]).optional().describe("Target server by numeric ID or exact name (account mode; defaults to POSTMARK_DEFAULT_SERVER)") }
+  : {};
 
 // Populated from the MCP initialize handshake once the client connects.
 let mcpClient = null; // { name: string, version: string|null }
@@ -66,6 +98,77 @@ const READ_ONLY  = { readOnlyHint: true,  destructiveHint: false, idempotentHint
 const MUTATING   = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true };
 const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true,  idempotentHint: false, openWorldHint: true };
 
+// Selects the Postmark auth header for a request. Account-level calls pass
+// auth: 'account'; server-scoped calls resolve their token from the active
+// request context (set per tool invocation) and fall back to the default.
+function authHeader(auth) {
+  if (auth === 'account') {
+    if (!accountToken) throw new Error('This operation requires POSTMARK_ACCOUNT_TOKEN to be set.');
+    return { 'X-Postmark-Account-Token': accountToken };
+  }
+  const token = requestContext.getStore()?.serverToken ?? defaultServerToken;
+  if (!token) {
+    throw new Error(
+      'No server token available for this request. Pass a `server` argument, ' +
+      'or set POSTMARK_DEFAULT_SERVER (account mode) or POSTMARK_SERVER_TOKEN.'
+    );
+  }
+  return { 'X-Postmark-Server-Token': token };
+}
+
+// Lazily populated id -> { name, token } map of the account's servers, built from
+// the account-scoped /servers endpoint. Only used in account mode.
+const serverCache = new Map();
+
+/** Fetches every server via the account token and rebuilds the id -> {name, token} cache. */
+async function loadServers() {
+  serverCache.clear();
+  for (let offset = 0; ; offset += SERVERS_PAGE_SIZE) {
+    const page = await postmarkRequest(`/servers${qs({ count: SERVERS_PAGE_SIZE, offset })}`, { auth: 'account' });
+    for (const s of page.Servers ?? []) {
+      serverCache.set(s.ID, { name: s.Name, token: s.ApiTokens?.[0] ?? null });
+    }
+    if (!page.TotalCount || offset + SERVERS_PAGE_SIZE >= page.TotalCount) break;
+  }
+  return serverCache;
+}
+
+/** Drops the cached server map so the next resolution refetches. */
+function invalidateServerCache() {
+  serverCache.clear();
+}
+
+/**
+ * Resolves a server reference to that server's API token, populating the cache on
+ * first use and refetching once on a miss to pick up servers created out of band.
+ * A number, or a string of only digits, is treated as an ID; any other string is
+ * matched against server names. A server whose name is all digits is therefore only
+ * reachable by its ID. Returns null when ref is empty so callers fall back to the
+ * default token.
+ */
+async function resolveServerToken(ref) {
+  if (ref === undefined || ref === null || ref === '') return null;
+
+  const lookup = () => {
+    if (typeof ref === 'number' || /^\d+$/.test(ref)) {
+      const byId = serverCache.get(Number(ref));
+      if (byId) return byId;
+    }
+    for (const entry of serverCache.values()) {
+      if (entry.name === ref) return entry;
+    }
+    return null;
+  };
+
+  if (serverCache.size === 0) await loadServers();
+  let entry = lookup();
+  if (!entry) { await loadServers(); entry = lookup(); }
+
+  if (!entry) throw new Error(`No server found matching "${ref}". Use listServers to see available servers by name and ID.`);
+  if (!entry.token) throw new Error(`Server "${ref}" has no API token available to the account token.`);
+  return entry.token;
+}
+
 /**
  * Minimal hardened HTTP client for the Postmark REST API over native fetch.
  * Stamps client identity headers, enforces a request timeout,
@@ -79,22 +182,23 @@ async function postmarkRequest(path, options = {}) {
   if (!path.startsWith('/') && !path.startsWith('http')) {
     throw new Error(`postmarkRequest: path must start with '/' or 'http', got: ${path}`);
   }
+  const { auth, ...fetchOptions } = options;
   const url = path.startsWith('http') ? path : `${POSTMARK_API_BASE}${path}`;
   const headers = {
     Accept: 'application/json',
-    'X-Postmark-Server-Token': serverToken,
+    ...authHeader(auth),
     'X-Postmark-Client': 'postmark-mcp',
     'X-Postmark-Client-Version': clientVersion,
     ...(mcpClient?.name && { 'X-Postmark-MCP-Client': [mcpClient.name, mcpClient.version].filter(Boolean).join('/') }),
     ...(agentLabel && { 'X-Agent-Label': agentLabel }),
-    ...options.headers,
+    ...fetchOptions.headers,
   };
-  if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+  if (fetchOptions.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   let res;
   try {
-    res = await fetch(url, { ...options, headers, signal: controller.signal });
+    res = await fetch(url, { ...fetchOptions, headers, signal: controller.signal });
   } catch (err) {
     if (err.name === 'AbortError') throw new Error(`Postmark request timed out after ${REQUEST_TIMEOUT_MS/1000}s: ${path}`);
     throw err;
@@ -119,11 +223,17 @@ function qs(params) {
 // Initialize Postmark client and MCP server
 async function initializeServices() {
   try {
-    if (!serverToken) {
-      console.error('[ERROR] POSTMARK_SERVER_TOKEN is not set.');
-      console.error('  → Find your Server Token at: https://account.postmarkapp.com → your server → API Tokens tab');
-      console.error('  → Set it in your .env file or pass it via the env block in your MCP client config.');
+    if (!serverToken && !accountToken) {
+      console.error('[ERROR] Neither POSTMARK_SERVER_TOKEN nor POSTMARK_ACCOUNT_TOKEN is set.');
+      console.error('  → Server Token (single server): https://account.postmarkapp.com → your server → API Tokens tab');
+      console.error('  → Account Token (account mode, all servers + account tools): https://account.postmarkapp.com → API Tokens tab');
+      console.error('  → Set one in your .env file or pass it via the env block in your MCP client config.');
       process.exit(1);
+    }
+
+    if (accountToken && !serverToken && !defaultServerRef) {
+      console.error('[WARN] Account mode is active with no default server (POSTMARK_SERVER_TOKEN or POSTMARK_DEFAULT_SERVER unset).');
+      console.error('  → Account tools work; server-scoped tools require an explicit `server` argument until a default is set.');
     }
 
     if (!defaultSender) {
@@ -145,14 +255,25 @@ async function initializeServices() {
     console.error('Message stream: ', defaultMessageStream);
     if (agentLabel) console.error('Agent label: ', agentLabel);
 
-    // Verify connectivity + token by making a test API call.
-    // Set POSTMARK_SKIP_VERIFY=true to bypass this check (e.g. in offline tests).
+    if (accountToken) console.error('Account mode: enabled');
+
+    // Verify connectivity + token with a test API call. In account mode this also
+    // resolves POSTMARK_DEFAULT_SERVER into the fallback server token; that lookup
+    // needs the account, so it only happens here, not under POSTMARK_SKIP_VERIFY.
+    // Set POSTMARK_SKIP_VERIFY=true to bypass the check (e.g. in offline tests).
     if (process.env.POSTMARK_SKIP_VERIFY === 'true') {
       if (serverToken !== 'POSTMARK_API_TEST') {
-        console.error('[WARN] POSTMARK_SKIP_VERIFY is enabled with a real server token — startup token verification is skipped. Do not use this in production.');
+        console.error('[WARN] POSTMARK_SKIP_VERIFY is enabled with a real token. Startup token verification is skipped; do not use this in production.');
       }
     } else {
-      await postmarkRequest('/server');
+      if (accountToken) {
+        await postmarkRequest(`/servers${qs({ count: 1, offset: 0 })}`, { auth: 'account' });
+        if (!defaultServerToken && defaultServerRef) {
+          defaultServerToken = await resolveServerToken(defaultServerRef);
+          console.error('Default server resolved: ', defaultServerRef);
+        }
+      }
+      if (defaultServerToken) await postmarkRequest('/server');
     }
 
     const mcpServer = new McpServer({
@@ -165,9 +286,10 @@ async function initializeServices() {
     const msg = error.message || '';
     if (msg.includes('401') || msg.toLowerCase().includes('unauthorized') || msg.includes('ErrorCode 10')) {
       throw new Error(
-        `Initialization failed: Postmark rejected the server token (401 Unauthorized).\n` +
-        `  → Verify POSTMARK_SERVER_TOKEN is correct and belongs to a Server Token (not an Account Token).\n` +
-        `  → https://account.postmarkapp.com → your server → API Tokens tab`
+        `Initialization failed: Postmark rejected a token (401 Unauthorized).\n` +
+        `  → POSTMARK_SERVER_TOKEN must be a Server Token; POSTMARK_ACCOUNT_TOKEN must be an Account Token. They are not interchangeable.\n` +
+        `  → Server tokens: https://account.postmarkapp.com → your server → API Tokens tab\n` +
+        `  → Account token: https://account.postmarkapp.com → API Tokens tab`
       );
     }
     if (error.cause?.code === 'ENOTFOUND' || msg.includes('fetch failed') || msg.includes('ENOTFOUND')) {
@@ -210,6 +332,11 @@ async function main() {
       'listSuppressions, createSuppressions, deleteSuppressions, ' +
       'getDeliveryStats, getServerInfo, ' +
       'listWebhooks, createWebhook, deleteWebhook');
+    if (accountToken) {
+      console.error('Account tools (15): listServers, createServer, editServer, deleteServer, ' +
+        'listDomains, getDomain, createDomain, verifyDomainDkim, verifyDomainReturnPath, deleteDomain, ' +
+        'listSenders, getSender, createSender, resendSenderConfirmation, deleteSender');
+    }
 
     process.on('SIGTERM', () => handleShutdown(server));
     process.on('SIGINT', () => handleShutdown(server));
@@ -413,9 +540,13 @@ function registerTools(server) {
   // The original handler is replaced with one that emits a JSON log line on
   // completion (or error), with sanitized args so no sensitive content leaks.
   const _tool = server.tool.bind(server);
-  server.tool = (name, ...rest) => {
-    const handler = rest[rest.length - 1];
-    rest[rest.length - 1] = async (args) => {
+
+  // Wraps a handler with structured logging. `resolveServer` is true for
+  // server-scoped tools: in account mode the wrapper resolves the per-call target
+  // server from the `server` argument and runs the handler inside a context
+  // postmarkRequest reads. Account tools pass false and authenticate themselves.
+  function logged(name, handler, resolveServer) {
+    return async (args) => {
       const start = Date.now();
       const base = {
         timestamp: new Date().toISOString(),
@@ -425,7 +556,10 @@ function registerTools(server) {
         args: sanitizeArgs(args),
       };
       try {
-        const result = await handler(args);
+        const token = resolveServer && accountToken ? await resolveServerToken(args?.server) : null;
+        const result = token
+          ? await requestContext.run({ serverToken: token }, () => handler(args))
+          : await handler(args);
         writeLog({ ...base, status: 'ok', durationMs: Date.now() - start });
         return result;
       } catch (err) {
@@ -433,8 +567,18 @@ function registerTools(server) {
         throw err;
       }
     };
-    return _tool(name, ...rest);
+  }
+
+  // Server-scoped tools. In account mode the optional `server` argument is spread
+  // into each schema (SERVER_SCOPE) and the wrapper routes the call to that server.
+  server.tool = (name, description, schema, annotations, handler) => {
+    return _tool(name, description, { ...SERVER_SCOPE, ...schema }, annotations, logged(name, handler, true));
   };
+
+  // Account-scoped tools (servers, domains, senders). Registered only in account
+  // mode; they carry no `server` argument and authenticate with the account token.
+  const accountTool = (name, description, schema, annotations, handler) =>
+    _tool(name, description, schema, annotations, logged(name, handler, false));
 
   // ─────────────── Email ───────────────
 
@@ -1561,6 +1705,372 @@ function registerTools(server) {
         content: [{
           type: "text",
           text: `Webhook ${webhookId} deleted successfully.`
+        }]
+      };
+    }
+  );
+
+  if (!accountToken) return;
+
+  // ─────────────── Account: servers ───────────────
+  //
+  // These tools use the account token. Server API tokens are never included in
+  // their output; use the server-scoped tools (with a `server` argument) to act
+  // on a specific server.
+
+  accountTool(
+    "listServers",
+    "List the Postmark servers in the account. Returns each server's name, ID, color, and delivery type. Optionally filter by name. Server API tokens are not included; use a server-scoped tool with the `server` argument to act on one.",
+    {
+      name: z.string().optional().describe("Filter to servers whose name contains this string"),
+      count: z.number().int().min(1).max(500).optional().describe("Page size (default 100, max 500)"),
+      offset: z.number().int().min(0).optional().describe("Number of servers to skip (default 0)")
+    },
+    READ_ONLY,
+    async ({ name, count, offset }) => {
+      console.error('Listing servers..');
+      const data = await postmarkRequest(`/servers${qs({ count: count ?? 100, offset: offset ?? 0, name })}`, { auth: 'account' });
+      const servers = data.Servers ?? [];
+      const lines = servers.map(s => `  ${String(s.ID).padStart(9)}  ${s.Name}  (${s.Color}, ${s.DeliveryType})`);
+      return {
+        content: [{
+          type: "text",
+          text: `Servers (${servers.length} of ${fmtInt(data.TotalCount)}):\n\n${lines.join('\n') || '  (none)'}`
+        }]
+      };
+    }
+  );
+
+  accountTool(
+    "createServer",
+    "Create a new Postmark server. Requires a name. Optionally set color and tracking defaults. The new server's API token is created by Postmark but is not returned here; retrieve it from the Postmark UI or use it via the `server` argument on server-scoped tools. Webhook URLs are set per server with createWebhook.",
+    {
+      name: z.string().describe("Server name (must be unique in the account)"),
+      color: z.enum(["Purple", "Blue", "Turquoise", "Green", "Red", "Yellow", "Grey", "Orange"]).optional().describe("Display color in the Postmark UI"),
+      deliveryType: z.enum(["Live", "Sandbox"]).optional().describe("Environment type; defaults to Live. Cannot be changed after creation. Use Sandbox for a server that accepts mail without delivering it"),
+      trackOpens: z.boolean().optional().describe("Enable open tracking by default"),
+      trackLinks: z.enum(["None", "HtmlAndText", "HtmlOnly", "TextOnly"]).optional().describe("Link tracking mode"),
+      smtpApiActivated: z.boolean().optional().describe("Enable the SMTP API for this server")
+    },
+    MUTATING,
+    async ({ name, color, deliveryType, trackOpens, trackLinks, smtpApiActivated }) => {
+      const body = { Name: name };
+      if (color) body.Color = color;
+      if (deliveryType) body.DeliveryType = deliveryType;
+      if (trackOpens !== undefined) body.TrackOpens = trackOpens;
+      if (trackLinks) body.TrackLinks = trackLinks;
+      if (smtpApiActivated !== undefined) body.SmtpApiActivated = smtpApiActivated;
+
+      console.error('Creating server..', { name });
+      const s = await postmarkRequest('/servers', { auth: 'account', method: 'POST', body: JSON.stringify(body) });
+      invalidateServerCache();
+      console.error('Server created: ', s.ID);
+      return {
+        content: [{
+          type: "text",
+          text: `Server "${s.Name}" created.\n\nID: ${s.ID}\nColor: ${s.Color || 'none'}\nDelivery type: ${s.DeliveryType || 'Live'}`
+        }]
+      };
+    }
+  );
+
+  accountTool(
+    "editServer",
+    "Update an existing Postmark server's settings by ID. Only the fields you pass are changed. Requires at least one field to update. Webhook URLs are managed per server with createWebhook.",
+    {
+      serverId: z.number().int().describe("The ID of the server to edit"),
+      name: z.string().optional().describe("New server name"),
+      color: z.enum(["Purple", "Blue", "Turquoise", "Green", "Red", "Yellow", "Grey", "Orange"]).optional().describe("Display color in the Postmark UI"),
+      trackOpens: z.boolean().optional().describe("Enable or disable open tracking"),
+      trackLinks: z.enum(["None", "HtmlAndText", "HtmlOnly", "TextOnly"]).optional().describe("Link tracking mode"),
+      smtpApiActivated: z.boolean().optional().describe("Enable or disable the SMTP API")
+    },
+    MUTATING,
+    async ({ serverId, name, color, trackOpens, trackLinks, smtpApiActivated }) => {
+      const body = {};
+      if (name) body.Name = name;
+      if (color) body.Color = color;
+      if (trackOpens !== undefined) body.TrackOpens = trackOpens;
+      if (trackLinks) body.TrackLinks = trackLinks;
+      if (smtpApiActivated !== undefined) body.SmtpApiActivated = smtpApiActivated;
+      if (Object.keys(body).length === 0) {
+        throw new Error('editServer requires at least one field to update.');
+      }
+
+      console.error('Editing server..', { serverId });
+      const s = await postmarkRequest(`/servers/${encodeURIComponent(serverId)}`, { auth: 'account', method: 'PUT', body: JSON.stringify(body) });
+      invalidateServerCache();
+      console.error('Server updated');
+      return {
+        content: [{
+          type: "text",
+          text: `Server "${s.Name}" (ID ${s.ID}) updated.`
+        }]
+      };
+    }
+  );
+
+  accountTool(
+    "deleteServer",
+    "Permanently delete a Postmark server by ID. This cannot be undone. Postmark notes this feature is not enabled for all accounts; if the account lacks it the API error is surfaced verbatim and you should contact Postmark support.",
+    {
+      serverId: z.number().int().describe("The ID of the server to delete")
+    },
+    DESTRUCTIVE,
+    async ({ serverId }) => {
+      console.error('Deleting server..', { serverId });
+      await postmarkRequest(`/servers/${encodeURIComponent(serverId)}`, { auth: 'account', method: 'DELETE' });
+      invalidateServerCache();
+      console.error('Server deleted');
+      return {
+        content: [{
+          type: "text",
+          text: `Server ${serverId} deleted successfully.`
+        }]
+      };
+    }
+  );
+
+  // ─────────────── Account: domains and sender signatures ───────────────
+
+  accountTool(
+    "listDomains",
+    "List the sending domains in the account. Returns each domain's name, ID, and SPF/DKIM/return-path verification status.",
+    {
+      count: z.number().int().min(1).max(500).optional().describe("Page size (default 100, max 500)"),
+      offset: z.number().int().min(0).optional().describe("Number of domains to skip (default 0)")
+    },
+    READ_ONLY,
+    async ({ count, offset }) => {
+      console.error('Listing domains..');
+      const data = await postmarkRequest(`/domains${qs({ count: count ?? 100, offset: offset ?? 0 })}`, { auth: 'account' });
+      const domains = data.Domains ?? [];
+      const lines = domains.map(d => `  ${String(d.ID).padStart(9)}  ${d.Name}  (SPF ${d.SPFVerified ? 'ok' : 'no'}, DKIM ${d.DKIMVerified ? 'ok' : 'no'}, return-path ${d.ReturnPathDomainVerified ? 'ok' : 'no'})`);
+      return {
+        content: [{
+          type: "text",
+          text: `Domains (${domains.length} of ${fmtInt(data.TotalCount)}):\n\n${lines.join('\n') || '  (none)'}`
+        }]
+      };
+    }
+  );
+
+  accountTool(
+    "getDomain",
+    "Retrieve full details for a sending domain by ID, including DKIM host and text value, return-path CNAME, and current verification status. Use this to obtain the DNS records that must be published to verify the domain.",
+    {
+      domainId: z.number().int().describe("The ID of the domain to retrieve")
+    },
+    READ_ONLY,
+    async ({ domainId }) => {
+      console.error('Fetching domain..', { domainId });
+      const d = await postmarkRequest(`/domains/${encodeURIComponent(domainId)}`, { auth: 'account' });
+      return {
+        content: [{
+          type: "text",
+          text: [
+            `Domain: ${d.Name} (ID ${d.ID})`,
+            '',
+            `SPF verified:         ${d.SPFVerified ? 'yes' : 'no'}`,
+            `DKIM verified:        ${d.DKIMVerified ? 'yes' : 'no'}`,
+            `Return-path verified: ${d.ReturnPathDomainVerified ? 'yes' : 'no'}`,
+            '',
+            `DKIM host:  ${d.DKIMPendingHost || d.DKIMHost || '(none)'}`,
+            `DKIM value: ${d.DKIMPendingTextValue || d.DKIMTextValue || '(none)'}`,
+            `Return-path: ${d.ReturnPathDomain || '(none)'} -> ${d.ReturnPathDomainCNAMEValue || '(none)'}`,
+          ].join('\n')
+        }]
+      };
+    }
+  );
+
+  accountTool(
+    "createDomain",
+    "Create a sending domain in the account. Postmark generates the DKIM and return-path records to publish; retrieve them with getDomain, then verify with verifyDomainDkim and verifyDomainReturnPath once the DNS is live.",
+    {
+      name: z.string().describe("The domain name, e.g. example.com"),
+      returnPathDomain: z.string().optional().describe("Custom return-path subdomain, e.g. pm-bounces.example.com")
+    },
+    MUTATING,
+    async ({ name, returnPathDomain }) => {
+      const body = { Name: name };
+      if (returnPathDomain) body.ReturnPathDomain = returnPathDomain;
+      console.error('Creating domain..', { name });
+      const d = await postmarkRequest('/domains', { auth: 'account', method: 'POST', body: JSON.stringify(body) });
+      console.error('Domain created: ', d.ID);
+      return {
+        content: [{
+          type: "text",
+          text: `Domain "${d.Name}" created (ID ${d.ID}). Use getDomain to retrieve its DKIM and return-path DNS records.`
+        }]
+      };
+    }
+  );
+
+  accountTool(
+    "verifyDomainDkim",
+    "Ask Postmark to re-check a domain's DKIM DNS record and update its verification status. Run after publishing the DKIM record returned by getDomain.",
+    {
+      domainId: z.number().int().describe("The ID of the domain to verify")
+    },
+    MUTATING,
+    async ({ domainId }) => {
+      console.error('Verifying domain DKIM..', { domainId });
+      const d = await postmarkRequest(`/domains/${encodeURIComponent(domainId)}/verifyDkim`, { auth: 'account', method: 'PUT' });
+      return {
+        content: [{
+          type: "text",
+          text: `DKIM for "${d.Name}" (ID ${d.ID}): ${d.DKIMVerified ? 'verified' : 'not verified yet'}.`
+        }]
+      };
+    }
+  );
+
+  accountTool(
+    "verifyDomainReturnPath",
+    "Ask Postmark to re-check a domain's return-path CNAME record and update its verification status. Run after publishing the return-path record returned by getDomain.",
+    {
+      domainId: z.number().int().describe("The ID of the domain to verify")
+    },
+    MUTATING,
+    async ({ domainId }) => {
+      console.error('Verifying domain return-path..', { domainId });
+      const d = await postmarkRequest(`/domains/${encodeURIComponent(domainId)}/verifyReturnPath`, { auth: 'account', method: 'PUT' });
+      return {
+        content: [{
+          type: "text",
+          text: `Return-path for "${d.Name}" (ID ${d.ID}): ${d.ReturnPathDomainVerified ? 'verified' : 'not verified yet'}.`
+        }]
+      };
+    }
+  );
+
+  accountTool(
+    "deleteDomain",
+    "Permanently delete a sending domain by ID. This cannot be undone. Sender signatures under the domain are affected; verify no active server relies on it first.",
+    {
+      domainId: z.number().int().describe("The ID of the domain to delete")
+    },
+    DESTRUCTIVE,
+    async ({ domainId }) => {
+      console.error('Deleting domain..', { domainId });
+      await postmarkRequest(`/domains/${encodeURIComponent(domainId)}`, { auth: 'account', method: 'DELETE' });
+      console.error('Domain deleted');
+      return {
+        content: [{
+          type: "text",
+          text: `Domain ${domainId} deleted successfully.`
+        }]
+      };
+    }
+  );
+
+  accountTool(
+    "listSenders",
+    "List the sender signatures (individual From addresses) in the account. Returns each signature's email, name, ID, and confirmation/DKIM status. For whole-domain sending use the domain tools instead.",
+    {
+      count: z.number().int().min(1).max(500).optional().describe("Page size (default 100, max 500)"),
+      offset: z.number().int().min(0).optional().describe("Number of signatures to skip (default 0)")
+    },
+    READ_ONLY,
+    async ({ count, offset }) => {
+      console.error('Listing sender signatures..');
+      const data = await postmarkRequest(`/senders${qs({ count: count ?? 100, offset: offset ?? 0 })}`, { auth: 'account' });
+      const senders = data.SenderSignatures ?? [];
+      const lines = senders.map(s => `  ${String(s.ID).padStart(9)}  ${s.EmailAddress}  (${s.Confirmed ? 'confirmed' : 'unconfirmed'})`);
+      return {
+        content: [{
+          type: "text",
+          text: `Sender signatures (${senders.length} of ${fmtInt(data.TotalCount)}):\n\n${lines.join('\n') || '  (none)'}`
+        }]
+      };
+    }
+  );
+
+  accountTool(
+    "getSender",
+    "Retrieve full details for a sender signature by ID, including confirmation status and DKIM settings.",
+    {
+      signatureId: z.number().int().describe("The ID of the sender signature to retrieve")
+    },
+    READ_ONLY,
+    async ({ signatureId }) => {
+      console.error('Fetching sender signature..', { signatureId });
+      const s = await postmarkRequest(`/senders/${encodeURIComponent(signatureId)}`, { auth: 'account' });
+      return {
+        content: [{
+          type: "text",
+          text: [
+            `Sender: ${s.EmailAddress} (ID ${s.ID})`,
+            `Name:      ${s.Name || '(none)'}`,
+            `Confirmed: ${s.Confirmed ? 'yes' : 'no'}`,
+            `DKIM:      ${s.DKIMVerified ? 'verified' : 'not verified'}`,
+          ].join('\n')
+        }]
+      };
+    }
+  );
+
+  accountTool(
+    "createSender",
+    "Create a sender signature for a single From address. Postmark emails the address a confirmation link; the signature cannot send until confirmed. To send from any address at a domain, verify the domain instead.",
+    {
+      fromEmail: z.string().email().describe("The From address to register"),
+      name: z.string().describe("The display name for this signature"),
+      replyToEmail: z.string().email().optional().describe("Default Reply-To address for this signature"),
+      returnPathDomain: z.string().optional().describe("Custom return-path subdomain")
+    },
+    MUTATING,
+    async ({ fromEmail, name, replyToEmail, returnPathDomain }) => {
+      const body = { FromEmail: fromEmail, Name: name };
+      if (replyToEmail) body.ReplyToEmail = replyToEmail;
+      if (returnPathDomain) body.ReturnPathDomain = returnPathDomain;
+      console.error('Creating sender signature..', { fromEmail: maskEmail(fromEmail) });
+      const s = await postmarkRequest('/senders', { auth: 'account', method: 'POST', body: JSON.stringify(body) });
+      console.error('Sender signature created: ', s.ID);
+      return {
+        content: [{
+          type: "text",
+          text: `Sender signature for ${s.EmailAddress} created (ID ${s.ID}). A confirmation email has been sent; it cannot send mail until confirmed.`
+        }]
+      };
+    }
+  );
+
+  accountTool(
+    "resendSenderConfirmation",
+    "Resend the confirmation email for an unconfirmed sender signature by ID.",
+    {
+      signatureId: z.number().int().describe("The ID of the sender signature")
+    },
+    MUTATING,
+    async ({ signatureId }) => {
+      console.error('Resending sender confirmation..', { signatureId });
+      await postmarkRequest(`/senders/${encodeURIComponent(signatureId)}/resend`, { auth: 'account', method: 'POST' });
+      return {
+        content: [{
+          type: "text",
+          text: `Confirmation email resent for sender signature ${signatureId}.`
+        }]
+      };
+    }
+  );
+
+  accountTool(
+    "deleteSender",
+    "Permanently delete a sender signature by ID. This cannot be undone. The address can no longer be used as a From address until re-registered and confirmed.",
+    {
+      signatureId: z.number().int().describe("The ID of the sender signature to delete")
+    },
+    DESTRUCTIVE,
+    async ({ signatureId }) => {
+      console.error('Deleting sender signature..', { signatureId });
+      await postmarkRequest(`/senders/${encodeURIComponent(signatureId)}`, { auth: 'account', method: 'DELETE' });
+      console.error('Sender signature deleted');
+      return {
+        content: [{
+          type: "text",
+          text: `Sender signature ${signatureId} deleted successfully.`
         }]
       };
     }

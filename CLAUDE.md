@@ -20,9 +20,10 @@ Official Postmark MCP (Model Context Protocol) server that enables AI assistants
 This is a single-file MCP server (`index.js`) using ES modules (`"type": "module"`). The structure within `index.js`:
 
 1. **Module-level formatting helpers** — `fmtInt`, `fmtPct`, `fmtPlatformUsage`, `fmtTopBreakdown`, `fmtDeliverySummary`, `fmtStatResponse`. Used by `getDeliveryStats` to render polished per-stat output. Keep these pure / dependency-free.
-2. **`initializeServices()`** — Validates required env vars, verifies connectivity via a `postmarkRequest('/server')` call, and instantiates `McpServer` from `@modelcontextprotocol/sdk`
-3. **`registerTools(server)`** — Registers all 24 MCP tools with Zod schemas for input validation. Each tool wraps a `postmarkRequest` call and returns formatted text responses
-4. **`main()`** — Orchestrates initialization, tool registration, and connects to `StdioServerTransport`
+2. **Auth and server resolution** — `authHeader` chooses the Postmark auth header at the single `postmarkRequest` choke point; `resolveServerToken` maps a `server` reference (id or name) to that server's token via a cached `GET /servers`. Active only in account mode.
+3. **`initializeServices()`** — Validates required env vars, verifies connectivity (`/servers` in account mode, `/server` when a default server token exists), resolves `POSTMARK_DEFAULT_SERVER`, and instantiates `McpServer` from `@modelcontextprotocol/sdk`
+4. **`registerTools(server)`** — Registers the 24 server-scoped MCP tools, and in account mode 15 account tools, with Zod schemas for input validation. Each tool wraps a `postmarkRequest` call and returns formatted text responses
+5. **`main()`** — Orchestrates initialization, tool registration, and connects to `StdioServerTransport`
 
 Communication uses stdio transport (stdin/stdout), not HTTP. All `console.error` calls are diagnostic logging (stdout is reserved for MCP protocol).
 
@@ -47,14 +48,19 @@ The server exposes 24 tools across these categories:
 ## Environment Variables
 
 Required (set in `.env` for local dev, or in MCP client config for production):
-- `POSTMARK_SERVER_TOKEN` — Postmark server API token
+- `POSTMARK_SERVER_TOKEN` — Postmark server API token (required unless `POSTMARK_ACCOUNT_TOKEN` is set)
 - `DEFAULT_SENDER_EMAIL` — Fallback sender address
 - `DEFAULT_MESSAGE_STREAM` — Message stream ID (typically `outbound`)
+
+Optional:
+- `POSTMARK_ACCOUNT_TOKEN` — Postmark account token. When set, enables account mode: the 15 account tools (servers, domains, sender signatures) are registered, and every server-scoped tool gains an optional `server` argument (numeric ID or exact name) that routes the call to that server. Off when unset; the server then behaves exactly as server-only.
+- `POSTMARK_DEFAULT_SERVER` — Account mode only. Name or numeric ID of the server whose token backs server-scoped tools when no `server` argument is given. `POSTMARK_SERVER_TOKEN` takes precedence when both are set. Not a secret.
 
 ## Key Patterns
 
 - All emails are auto-configured with `TrackOpens: true` and `TrackLinks: "HtmlAndText"`
-- All tools call `postmarkRequest(path, options)` — a single hardened native-`fetch` client at the top of `index.js` (no SDK; the `postmark` npm package is no longer a dependency). It stamps auth (`X-Postmark-Server-Token`) plus client-identity and correlation-id headers (`X-Postmark-Client` / `X-Postmark-Client-Version` / `X-Postmark-Correlation-Id`), enforces a 60s timeout via `AbortController`, and maps non-2xx responses to `Error`s surfacing Postmark's `Message` / `ErrorCode`. A `qs()` helper builds query strings for GET filters.
+- All tools call `postmarkRequest(path, options)` — a single hardened native-`fetch` client at the top of `index.js` (no SDK; the `postmark` npm package is no longer a dependency). It stamps auth plus client-identity and correlation-id headers (`X-Postmark-Client` / `X-Postmark-Client-Version` / `X-Postmark-Correlation-Id`), enforces a 60s timeout via `AbortController`, and maps non-2xx responses to `Error`s surfacing Postmark's `Message` / `ErrorCode`. A `qs()` helper builds query strings for GET filters.
+- Auth is chosen in `postmarkRequest`: `options.auth === 'account'` sends `X-Postmark-Account-Token` (account tools); otherwise `X-Postmark-Server-Token` is sent using the per-call token from `requestContext` (an `AsyncLocalStorage` set by the tool wrapper from the `server` argument) or the default server token. This keeps auth at one choke point and keeps concurrent server-scoped calls isolated.
 - Tool handlers follow a consistent pattern: log start, call API, log result, return `{ content: [{ type: "text", text }] }`
 - Postmark API field names are PascalCase (`From`, `To`, `Subject`, `EmailAddress`); query-string filters on list endpoints are typically lowercase (`fromdate`, `todate`, `messagestream`). Postmark's API is case-insensitive on query params, but match the convention you see in nearby code (build query strings with the `qs()` helper)
 - Numeric IDs use `z.number().int()`; date strings use `.regex(/^\d{4}-\d{2}-\d{2}$/)` for YYYY-MM-DD validation

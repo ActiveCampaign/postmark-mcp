@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Account mode (opt-in via `POSTMARK_ACCOUNT_TOKEN`).** When an account token is configured the server can reach account-level endpoints and route any server-scoped tool at a specific server, so a single connection covers every server in the account rather than one. Off by default: with only `POSTMARK_SERVER_TOKEN` set, the tool set, schemas, and behavior are unchanged.
+  - 15 account tools: `listServers`, `createServer`, `editServer`, `deleteServer`; `listDomains`, `getDomain`, `createDomain`, `verifyDomainDkim`, `verifyDomainReturnPath`, `deleteDomain`; `listSenders`, `getSender`, `createSender`, `resendSenderConfirmation`, `deleteSender`.
+  - Server-scoped tools gain an optional `server` argument (numeric ID or exact name) in account mode. `POSTMARK_DEFAULT_SERVER` (name or ID) selects the server used when the argument is omitted; `POSTMARK_SERVER_TOKEN` still takes precedence when both are set.
+  - Server API tokens are resolved from the account and never appear in tool output or logs. Account tools authenticate with the account token via `X-Postmark-Account-Token`; server-scoped tools continue to use `X-Postmark-Server-Token`.
+
 ### Planned (deferred from v2.1.0)
 
 - **`getWebhook` tool** — retrieve a single webhook's full configuration by ID (`GET /webhooks/{Id}`). Currently only `listWebhooks` is available; getting a single webhook requires filtering the list by ID.
