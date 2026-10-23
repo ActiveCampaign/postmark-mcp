@@ -75,9 +75,9 @@ const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true,  idempotentHin
  */
 async function postmarkRequest(path, options = {}) {
   // All internal callers pass a literal path starting with '/'. Absolute URLs are
-  // accepted only on the Postmark API origin so the server token below can never
-  // be sent to another host. Resolved before the timer is created, so a throw
-  // here leaks nothing.
+  // accepted only on the Postmark API origin. Redirects are refused below
+  // (redirect: 'error') because fetch carries custom headers such as the server
+  // token across a cross-origin redirect.
   const url = resolvePostmarkUrl(path, POSTMARK_API_BASE);
   const headers = {
     Accept: 'application/json',
@@ -93,7 +93,7 @@ async function postmarkRequest(path, options = {}) {
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   let res;
   try {
-    res = await fetch(url, { ...options, headers, signal: controller.signal });
+    res = await fetch(url, { ...options, headers, redirect: 'error', signal: controller.signal });
   } catch (err) {
     if (err.name === 'AbortError') throw new Error(`Postmark request timed out after ${REQUEST_TIMEOUT_MS/1000}s: ${path}`);
     throw err;

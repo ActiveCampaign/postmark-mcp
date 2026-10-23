@@ -301,3 +301,26 @@ test('resolvePostmarkUrl: protocol-relative URL throws', () => {
     { message: 'Refusing non-Postmark URL: //evil.example/x' },
   );
 });
+
+test('resolvePostmarkUrl: lookalike Postmark URLs throw', () => {
+  const lookalikes = [
+    'https://api.postmarkapp.com@evil.com/',
+    'https://api.postmarkapp.com.evil.com/x',
+    'https://api.postmarkapp.com\\@evil.com/',
+    'http://api.postmarkapp.com/x',
+    'https://api.postmarkapp.com:8443/x',
+  ];
+  for (const url of lookalikes) {
+    assert.throws(
+      () => resolvePostmarkUrl(url, POSTMARK_API_BASE),
+      { message: `Refusing non-Postmark URL: ${url}` },
+      url,
+    );
+  }
+});
+
+test('resolvePostmarkUrl: non-string path throws, even with a startsWith method', () => {
+  const spoof = { startsWith: () => true, toString: () => 'https://evil.example/x' };
+  assert.throws(() => resolvePostmarkUrl(spoof, POSTMARK_API_BASE), /Refusing non-string request path/);
+  assert.throws(() => resolvePostmarkUrl(undefined, POSTMARK_API_BASE), /Refusing non-string request path/);
+});
