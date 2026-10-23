@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Minimum supported Node.js is now 22 (`engines.node` `>=22.0.0`).** Node 20 is end-of-life and did not receive fixes in the [October 21, 2026 Node.js security releases](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases). Run the latest patch of your release line (22.23.4, 24.22.1, or 26.12.1 or newer).
+
+### Security
+
+- **Request URLs are now restricted to the Postmark API origin.** `postmarkRequest` refuses any URL outside `https://api.postmarkapp.com`, so the server token can only be sent to api.postmarkapp.com.
+
 ### Planned (deferred from v2.1.0)
 
 - **`getWebhook` tool** — retrieve a single webhook's full configuration by ID (`GET /webhooks/{Id}`). Currently only `listWebhooks` is available; getting a single webhook requires filtering the list by ID.

@@ -32,7 +32,7 @@
     "postmark-mcp": "index.js"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   },
   "files": [
     "index.js",
