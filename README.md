@@ -37,7 +37,7 @@ Follow us on X - [@postmarkapp](https://x.com/postmarkapp)
 # Setup
 
 ## Requirements
-- Node.js v20 or higher
+- Node.js v22 or higher. Run the latest patch release of your Node line; see the [October 2026 Node.js security releases](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases).
 - A [Postmark account](https://account.postmarkapp.com/sign_up) and server token
 
 ## Installation (Local Development)

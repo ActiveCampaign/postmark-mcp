@@ -13,6 +13,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { createRequire } from 'module';
 import { createLogger } from './lib/log.js';
+import { resolvePostmarkUrl } from './lib/url.js';
 
 const require = createRequire(import.meta.url);
 const { version: clientVersion } = require('./package.json');
@@ -73,13 +74,11 @@ const DESTRUCTIVE = { readOnlyHint: false, destructiveHint: true,  idempotentHin
  * Message / ErrorCode. Returns parsed JSON (or null for empty 2xx bodies).
  */
 async function postmarkRequest(path, options = {}) {
-  // All internal callers pass a literal path starting with '/'. The absolute-URL
-  // branch is kept for flexibility, but anything else is a programming error and
-  // would be an SSRF footgun if user-influenced input ever reached this parameter.
-  if (!path.startsWith('/') && !path.startsWith('http')) {
-    throw new Error(`postmarkRequest: path must start with '/' or 'http', got: ${path}`);
-  }
-  const url = path.startsWith('http') ? path : `${POSTMARK_API_BASE}${path}`;
+  // All internal callers pass a literal path starting with '/'. Absolute URLs are
+  // accepted only on the Postmark API origin. Redirects are refused below
+  // (redirect: 'error') because fetch carries custom headers such as the server
+  // token across a cross-origin redirect.
+  const url = resolvePostmarkUrl(path, POSTMARK_API_BASE);
   const headers = {
     Accept: 'application/json',
     'X-Postmark-Server-Token': serverToken,
@@ -94,7 +93,7 @@ async function postmarkRequest(path, options = {}) {
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   let res;
   try {
-    res = await fetch(url, { ...options, headers, signal: controller.signal });
+    res = await fetch(url, { ...options, headers, redirect: 'error', signal: controller.signal });
   } catch (err) {
     if (err.name === 'AbortError') throw new Error(`Postmark request timed out after ${REQUEST_TIMEOUT_MS/1000}s: ${path}`);
     throw err;

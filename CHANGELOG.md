@@ -18,6 +18,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [3.0.0] - 2026-10-23
+
+This release raises the minimum Node.js version to 22 and restricts where the server token can be sent. It includes one breaking change for users on Node 20.
+
+### ⚠ Breaking changes
+
+- **Minimum supported Node.js is now 22 (`engines.node` `>=22.0.0`).** Node 20 is end-of-life and did not receive fixes in the [October 21, 2026 Node.js security releases](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases). Run the latest patch of your release line (22.23.4, 24.22.1, or 26.12.1 or newer). Users on Node 20 will see `EBADENGINE` warnings on install, or hard failures with `engine-strict=true`.
+
+### Security
+
+- **Request URLs are now restricted to the Postmark API origin, and redirects are refused.** `postmarkRequest` refuses any URL outside `https://api.postmarkapp.com` and fails any request that gets a redirect response (`redirect: 'error'`), because `fetch` would otherwise carry `X-Postmark-Server-Token` across a cross-origin redirect. The server token is only sent to api.postmarkapp.com. If a Postmark endpoint ever responds with a redirect, that call now fails instead of following it.
+
+---
+
 ## [2.1.1] - 2026-07-13
 
 ### Fixed

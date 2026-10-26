@@ -1,5 +1,6 @@
 /**
- * Unit tests for lib/log.js — maskEmail, sanitizeArgs, writeLog.
+ * Unit tests for lib/log.js — maskEmail, sanitizeArgs, writeLog —
+ * and lib/url.js — resolvePostmarkUrl.
  *
  * No Postmark account or server required. All tests run against pure functions.
  *
@@ -13,6 +14,7 @@ import { readFileSync, existsSync, unlinkSync, mkdtempSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { createLogger } from './lib/log.js';
+import { resolvePostmarkUrl } from './lib/url.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -267,4 +269,58 @@ test('writeLog: no LOG_FILE does not create a file', () => {
   const path = join(tmpdir(), `postmark-mcp-should-not-exist-${Date.now()}.log`);
   writeLog({ tool: 'getServerInfo', status: 'ok' });
   assert.equal(existsSync(path), false);
+});
+
+// ─── resolvePostmarkUrl ───────────────────────────────────────────────────────
+
+const POSTMARK_API_BASE = 'https://api.postmarkapp.com';
+
+test('resolvePostmarkUrl: "/"-prefixed path resolves to the Postmark origin', () => {
+  assert.equal(resolvePostmarkUrl('/server', POSTMARK_API_BASE), 'https://api.postmarkapp.com/server');
+  assert.equal(
+    resolvePostmarkUrl('/bounces?count=10', POSTMARK_API_BASE),
+    'https://api.postmarkapp.com/bounces?count=10',
+  );
+});
+
+test('resolvePostmarkUrl: absolute URL on the Postmark origin is accepted unchanged', () => {
+  const url = 'https://api.postmarkapp.com/server';
+  assert.equal(resolvePostmarkUrl(url, POSTMARK_API_BASE), url);
+});
+
+test('resolvePostmarkUrl: absolute URL on another host throws', () => {
+  assert.throws(
+    () => resolvePostmarkUrl('https://evil.example/x', POSTMARK_API_BASE),
+    { message: 'Refusing non-Postmark URL: https://evil.example/x' },
+  );
+});
+
+test('resolvePostmarkUrl: protocol-relative URL throws', () => {
+  assert.throws(
+    () => resolvePostmarkUrl('//evil.example/x', POSTMARK_API_BASE),
+    { message: 'Refusing non-Postmark URL: //evil.example/x' },
+  );
+});
+
+test('resolvePostmarkUrl: lookalike Postmark URLs throw', () => {
+  const lookalikes = [
+    'https://api.postmarkapp.com@evil.com/',
+    'https://api.postmarkapp.com.evil.com/x',
+    'https://api.postmarkapp.com\\@evil.com/',
+    'http://api.postmarkapp.com/x',
+    'https://api.postmarkapp.com:8443/x',
+  ];
+  for (const url of lookalikes) {
+    assert.throws(
+      () => resolvePostmarkUrl(url, POSTMARK_API_BASE),
+      { message: `Refusing non-Postmark URL: ${url}` },
+      url,
+    );
+  }
+});
+
+test('resolvePostmarkUrl: non-string path throws, even with a startsWith method', () => {
+  const spoof = { startsWith: () => true, toString: () => 'https://evil.example/x' };
+  assert.throws(() => resolvePostmarkUrl(spoof, POSTMARK_API_BASE), /Refusing non-string request path/);
+  assert.throws(() => resolvePostmarkUrl(undefined, POSTMARK_API_BASE), /Refusing non-string request path/);
 });
