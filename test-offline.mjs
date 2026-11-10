@@ -13,6 +13,7 @@
  *   5. Read-only tools carry readOnlyHint: true
  *   6. Mutating tools carry readOnlyHint: false, destructiveHint: false
  *   7. Destructive tools carry destructiveHint: true
+ *   8. Outgoing API requests never advertise br (CVE-2026-111497)
  *
  * Run:  node --test test-offline.mjs
  *  or:  npm run test:offline
@@ -22,6 +23,9 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { mkdtempSync, readFileSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 
 // ─── Server factory ────────────────────────────────────────────────────────────
 
@@ -29,10 +33,10 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
  * Spawns index.js over stdio and returns a connected MCP Client.
  * Caller is responsible for calling client.close() when done.
  */
-async function startServer(extraEnv = {}) {
+async function startServer(extraEnv = {}, nodeArgs = []) {
   const transport = new StdioClientTransport({
     command: 'node',
-    args: ['index.js'],
+    args: [...nodeArgs, 'index.js'],
     env: {
       ...process.env,
       // POSTMARK_API_TEST is the documented Postmark test token — accepted by the
@@ -288,4 +292,30 @@ test('every registered tool belongs to exactly one annotation category', async (
     uncategorised, [],
     `these tools are not covered by the annotation test lists: ${uncategorised.join(', ')}`,
   );
+});
+
+// ─── Request encoding ─────────────────────────────────────────────────────────
+
+test('outgoing API requests send Accept-Encoding: gzip, deflate (never br)', async () => {
+  const captureDir = mkdtempSync(join(tmpdir(), 'pm-mcp-fetch-'));
+  const captureFile = join(captureDir, 'requests.jsonl');
+  let requests;
+  try {
+    const client = await startServer(
+      { POSTMARK_SKIP_VERIFY: 'false', FETCH_CAPTURE_FILE: captureFile },
+      ['--import', './test-fetch-capture.mjs'],
+    );
+    try {
+      await callTool(client, 'getServerInfo', {});
+    } finally {
+      await client.close();
+    }
+    requests = readFileSync(captureFile, 'utf8').trim().split('\n').map(l => JSON.parse(l));
+  } finally {
+    rmSync(captureDir, { recursive: true, force: true });
+  }
+  assert.ok(requests.length >= 2, `expected the startup check and getServerInfo, got ${requests.length} request(s)`);
+  for (const { url, headers } of requests) {
+    assert.equal(headers['Accept-Encoding'], 'gzip, deflate', url);
+  }
 });

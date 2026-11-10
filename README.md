@@ -37,7 +37,8 @@ Follow us on X - [@postmarkapp](https://x.com/postmarkapp)
 # Setup
 
 ## Requirements
-- Node.js v22 or higher. Run the latest patch release of your Node line; see the [October 2026 Node.js security releases](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases).
+- Node.js v22 or higher, on the latest patch of your release line. For the Brotli decoder RCE (CVE-2026-111497), official nodejs.org builds are fixed in 22.23.4+, 24.22.1+ and 26.12.1+; Node 20, 23 and 25 never got the fix. See the [October 2026 Node.js security releases](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases). Builds linked against the system Brotli library (`node_shared_brotli`, for example Homebrew's) also need that library updated, whatever the Node version.
+- Your MCP client may launch a different `node` from the one in your shell. If that `node` is unpatched, or uses the system Brotli library, the server logs a `[WARN]` naming its path.
 - A [Postmark account](https://account.postmarkapp.com/sign_up) and server token
 
 ## Installation (Local Development)

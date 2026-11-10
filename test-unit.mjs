@@ -1,6 +1,6 @@
 /**
  * Unit tests for lib/log.js — maskEmail, sanitizeArgs, writeLog —
- * and lib/url.js — resolvePostmarkUrl.
+ * lib/url.js — resolvePostmarkUrl — and lib/runtime.js — hasBrotliFix, brotliRuntimeWarnings, withAcceptEncoding.
  *
  * No Postmark account or server required. All tests run against pure functions.
  *
@@ -15,6 +15,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { createLogger } from './lib/log.js';
 import { resolvePostmarkUrl } from './lib/url.js';
+import { hasBrotliFix, brotliRuntimeWarnings, withAcceptEncoding, ACCEPT_ENCODING } from './lib/runtime.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -323,4 +324,77 @@ test('resolvePostmarkUrl: non-string path throws, even with a startsWith method'
   const spoof = { startsWith: () => true, toString: () => 'https://evil.example/x' };
   assert.throws(() => resolvePostmarkUrl(spoof, POSTMARK_API_BASE), /Refusing non-string request path/);
   assert.throws(() => resolvePostmarkUrl(undefined, POSTMARK_API_BASE), /Refusing non-string request path/);
+});
+
+// ─── hasBrotliFix ─────────────────────────────────────────────────────────────
+
+test('hasBrotliFix: first patched release of each line and later are fixed', () => {
+  for (const v of ['22.23.4', 'v22.23.4', '22.23.10', '22.24.0', '24.22.1', '24.23.0', '26.12.1', '26.13.0', '27.0.0', '30.1.2']) {
+    assert.equal(hasBrotliFix(v), true, v);
+  }
+});
+
+test('hasBrotliFix: releases before the fix are not fixed', () => {
+  for (const v of ['22.0.0', '22.9.0', '22.23.3', '22.22.9', '24.0.0', '24.22.0', '26.0.0', '26.12.0']) {
+    assert.equal(hasBrotliFix(v), false, v);
+  }
+});
+
+test('hasBrotliFix: lines that never got the fix, prereleases on fixed lines, and garbage, are not fixed', () => {
+  for (const v of ['20.19.5', '23.11.1', '25.9.0', '18.20.8', '26.12.1-rc.1', '22.23.4-nightly20261021', '22.24.0-pre', '', 'banana', undefined, null]) {
+    assert.equal(hasBrotliFix(v), false, String(v));
+  }
+});
+
+// ─── brotliRuntimeWarnings ────────────────────────────────────────────────────
+
+const runtime = (o = {}) => ({ node: '22.23.4', execPath: '/usr/bin/node', sharedBrotli: false, brotli: '1.2.1', ...o });
+
+test('brotliRuntimeWarnings: patched official build says nothing', () => {
+  assert.deepEqual(brotliRuntimeWarnings(runtime()), []);
+});
+
+test('brotliRuntimeWarnings: unpatched Node names its version and binary', () => {
+  const lines = brotliRuntimeWarnings(runtime({ node: '22.9.0', execPath: '/opt/node22/bin/node' }));
+  assert.match(lines[0], /^\[WARN\] Node\.js 22\.9\.0 \(\/opt\/node22\/bin\/node\)/);
+  assert.ok(lines.some(l => l.includes('20, 23 and 25 never got the fix')));
+});
+
+test('brotliRuntimeWarnings: shared system Brotli warns even on a patched Node version', () => {
+  const lines = brotliRuntimeWarnings(runtime({ sharedBrotli: true, brotli: '1.2.0', execPath: '/opt/homebrew/bin/node' }));
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /system Brotli library \(1\.2\.0\)/);
+});
+
+test('brotliRuntimeWarnings: unpatched Node with shared Brotli gets both warnings', () => {
+  const lines = brotliRuntimeWarnings(runtime({ node: '20.19.5', sharedBrotli: true }));
+  assert.equal(lines.filter(l => l.startsWith('[WARN]')).length, 2);
+});
+
+// ─── withAcceptEncoding ───────────────────────────────────────────────────────
+
+test('withAcceptEncoding: never advertises br', () => {
+  assert.equal(ACCEPT_ENCODING, 'gzip, deflate');
+  assert.doesNotMatch(ACCEPT_ENCODING, /\bbr\b/i);
+});
+
+test('withAcceptEncoding: adds the header to empty or missing caller headers', () => {
+  for (const h of [undefined, null, {}]) {
+    assert.deepEqual(withAcceptEncoding(h), { 'Accept-Encoding': 'gzip, deflate' }, String(h));
+  }
+});
+
+test('withAcceptEncoding: replaces a caller Accept-Encoding whatever its case, keeps other headers', () => {
+  const out = withAcceptEncoding({ 'ACCEPT-ENCODING': 'br', 'accept-encoding': 'br', 'X-Test': '1' });
+  assert.deepEqual(out, { 'X-Test': '1', 'Accept-Encoding': 'gzip, deflate' });
+});
+
+test('withAcceptEncoding: accepts an array of [name, value] pairs', () => {
+  const out = withAcceptEncoding([['Accept-Encoding', 'br'], ['X-Test', '1']]);
+  assert.deepEqual(out, { 'X-Test': '1', 'Accept-Encoding': 'gzip, deflate' });
+});
+
+test('withAcceptEncoding: accepts a Headers instance', () => {
+  const out = withAcceptEncoding(new Headers({ 'Accept-Encoding': 'br', 'X-Test': '1' }));
+  assert.deepEqual(out, { 'x-test': '1', 'Accept-Encoding': 'gzip, deflate' });
 });

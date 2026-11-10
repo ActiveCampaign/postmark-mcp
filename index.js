@@ -14,6 +14,7 @@ import { z } from "zod";
 import { createRequire } from 'module';
 import { createLogger } from './lib/log.js';
 import { resolvePostmarkUrl } from './lib/url.js';
+import { brotliRuntimeWarnings, withAcceptEncoding } from './lib/runtime.js';
 
 const require = createRequire(import.meta.url);
 const { version: clientVersion } = require('./package.json');
@@ -86,7 +87,8 @@ async function postmarkRequest(path, options = {}) {
     'X-Postmark-Client-Version': clientVersion,
     ...(mcpClient?.name && { 'X-Postmark-MCP-Client': [mcpClient.name, mcpClient.version].filter(Boolean).join('/') }),
     ...(agentLabel && { 'X-Agent-Label': agentLabel }),
-    ...options.headers,
+    // Node's fetch advertises br by default; never ask for it (CVE-2026-111497).
+    ...withAcceptEncoding(options.headers),
   };
   if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
   const controller = new AbortController();
@@ -138,6 +140,13 @@ async function initializeServices() {
       console.error('  → View streams at: https://account.postmarkapp.com → your server → Message Streams');
       process.exit(1);
     }
+
+    brotliRuntimeWarnings({
+      node: process.versions.node,
+      execPath: process.execPath,
+      sharedBrotli: Boolean(process.config.variables?.node_shared_brotli),
+      brotli: process.versions.brotli,
+    }).forEach((line) => console.error(line));
 
     console.error('Initializing Postmark MCP server..');
     console.error('Default sender: ', defaultSender);
