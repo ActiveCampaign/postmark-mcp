@@ -37,7 +37,7 @@ Follow us on X - [@postmarkapp](https://x.com/postmarkapp)
 # Setup
 
 ## Requirements
-- Node.js v22 or higher. Run the latest patch release of your Node line; see the [October 2026 Node.js security releases](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases).
+- Node.js v22 or higher. Run the latest patch release of your Node line: 22.23.4, 24.22.1 or 26.12.1 or newer fixes the Brotli decoder RCE (CVE-2026-111497); see the [October 2026 Node.js security releases](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases). Your MCP client may launch a different `node` from the one in your shell. If so, the server logs a `[WARN]` with the path of the Node binary it is running on.
 - A [Postmark account](https://account.postmarkapp.com/sign_up) and server token
 
 ## Installation (Local Development)

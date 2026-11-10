@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Brotli is no longer requested from the Postmark API ([CVE-2026-111497](https://www.cve.org/CVERecord?id=CVE-2026-111497)).** Node's `fetch` advertises `br` by default, and the API honours it. `postmarkRequest` now always sends `Accept-Encoding: gzip, deflate`, so the API answers with gzip and the runtime's Brotli decoder is not used. Someone who can tamper with the API's responses could still send `br`, and `fetch` decodes it before any application code sees it. Only a patched Node.js closes that.
+- **Startup warning on unpatched Node.js.** The server logs a `[WARN]` to stderr when the running Node.js predates the Brotli decoder fix (22.23.4, 24.22.1, 26.12.1), and names the Node binary in use (`process.execPath`). MCP clients often launch a different `node` from the one on your shell's PATH. It does not refuse to start; see the [Node.js security release](https://nodejs.org/en/blog/vulnerability/october-2026-security-releases). Upgrading Node.js is the actual fix. The changes above stop this server from requesting Brotli, but they cannot make an unpatched runtime safe.
+
 ### Planned (deferred from v2.1.0)
 
 - **`getWebhook` tool** — retrieve a single webhook's full configuration by ID (`GET /webhooks/{Id}`). Currently only `listWebhooks` is available; getting a single webhook requires filtering the list by ID.

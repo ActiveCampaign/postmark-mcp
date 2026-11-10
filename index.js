@@ -14,6 +14,7 @@ import { z } from "zod";
 import { createRequire } from 'module';
 import { createLogger } from './lib/log.js';
 import { resolvePostmarkUrl } from './lib/url.js';
+import { hasBrotliFix } from './lib/runtime.js';
 
 const require = createRequire(import.meta.url);
 const { version: clientVersion } = require('./package.json');
@@ -86,7 +87,9 @@ async function postmarkRequest(path, options = {}) {
     'X-Postmark-Client-Version': clientVersion,
     ...(mcpClient?.name && { 'X-Postmark-MCP-Client': [mcpClient.name, mcpClient.version].filter(Boolean).join('/') }),
     ...(agentLabel && { 'X-Agent-Label': agentLabel }),
-    ...options.headers,
+    ...withoutAcceptEncoding(options.headers),
+    // Node's fetch advertises br by default; never ask for it (CVE-2026-111497).
+    'Accept-Encoding': 'gzip, deflate',
   };
   if (options.body && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
   const controller = new AbortController();
@@ -107,6 +110,11 @@ async function postmarkRequest(path, options = {}) {
     throw new Error(`Postmark API ${res.status}${code != null ? ` (ErrorCode ${code})` : ''}: ${message}`);
   }
   return text ? JSON.parse(text) : null;
+}
+
+/** Drops any caller-supplied Accept-Encoding, whatever its case, so postmarkRequest's own value wins. */
+function withoutAcceptEncoding(headers = {}) {
+  return Object.fromEntries(Object.entries(headers).filter(([k]) => k.toLowerCase() !== 'accept-encoding'));
 }
 
 /** Build a query string from a params object, skipping undefined/null/empty values. */
@@ -137,6 +145,12 @@ async function initializeServices() {
       console.error('  → Set this to your outbound message stream ID (typically "outbound").');
       console.error('  → View streams at: https://account.postmarkapp.com → your server → Message Streams');
       process.exit(1);
+    }
+
+    if (!hasBrotliFix(process.versions.node)) {
+      console.error(`[WARN] Node.js ${process.versions.node} (${process.execPath}) is affected by CVE-2026-111497 (Brotli decoder RCE).`);
+      console.error('  → This server does not request Brotli, but the runtime itself stays vulnerable until it is upgraded.');
+      console.error('  → Upgrade that Node.js to 22.23.4, 24.22.1, 26.12.1 or newer: https://nodejs.org/en/blog/vulnerability/october-2026-security-releases');
     }
 
     console.error('Initializing Postmark MCP server..');

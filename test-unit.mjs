@@ -1,6 +1,6 @@
 /**
  * Unit tests for lib/log.js — maskEmail, sanitizeArgs, writeLog —
- * and lib/url.js — resolvePostmarkUrl.
+ * lib/url.js — resolvePostmarkUrl — and lib/runtime.js — hasBrotliFix.
  *
  * No Postmark account or server required. All tests run against pure functions.
  *
@@ -15,6 +15,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { createLogger } from './lib/log.js';
 import { resolvePostmarkUrl } from './lib/url.js';
+import { hasBrotliFix } from './lib/runtime.js';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -323,4 +324,24 @@ test('resolvePostmarkUrl: non-string path throws, even with a startsWith method'
   const spoof = { startsWith: () => true, toString: () => 'https://evil.example/x' };
   assert.throws(() => resolvePostmarkUrl(spoof, POSTMARK_API_BASE), /Refusing non-string request path/);
   assert.throws(() => resolvePostmarkUrl(undefined, POSTMARK_API_BASE), /Refusing non-string request path/);
+});
+
+// ─── hasBrotliFix ─────────────────────────────────────────────────────────────
+
+test('hasBrotliFix: first patched release of each line and later are fixed', () => {
+  for (const v of ['22.23.4', 'v22.23.4', '22.23.10', '22.24.0', '24.22.1', '24.23.0', '26.12.1', '26.13.0', '27.0.0', '30.1.2']) {
+    assert.equal(hasBrotliFix(v), true, v);
+  }
+});
+
+test('hasBrotliFix: releases before the fix are not fixed', () => {
+  for (const v of ['22.0.0', '22.9.0', '22.23.3', '22.22.9', '24.0.0', '24.22.0', '26.0.0', '26.12.0']) {
+    assert.equal(hasBrotliFix(v), false, v);
+  }
+});
+
+test('hasBrotliFix: lines that never got the fix, and garbage, are not fixed', () => {
+  for (const v of ['20.19.5', '23.11.1', '25.9.0', '18.20.8', '', 'banana', undefined, null]) {
+    assert.equal(hasBrotliFix(v), false, String(v));
+  }
 });
